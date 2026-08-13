@@ -81,6 +81,8 @@ pub struct Output {
     pub tag_labels: Vec<Option<String>>,
     /// Focused window id (streamwm id) on this output, if any.
     pub focused_window: Option<u32>,
+    /// Layer-shell output state (created once via get_output).
+    pub layer: Option<crate::protocols::layer_shell::river_layer_shell_output_v1::RiverLayerShellOutputV1>,
 }
 
 impl Output {
@@ -99,6 +101,7 @@ impl Output {
             urgent_mask: 0,
             tag_labels: vec![None; NUM_TAGS],
             focused_window: None,
+            layer: None,
         }
     }
 
@@ -116,6 +119,8 @@ pub struct Seat {
     pub pointer_y: i32,
     /// Window currently under the pointer (streamwm id), if any.
     pub pointer_window: Option<u32>,
+    /// Layer-shell seat state (created once via get_seat).
+    pub layer: Option<crate::protocols::layer_shell::river_layer_shell_seat_v1::RiverLayerShellSeatV1>,
 }
 
 impl Seat {
@@ -125,6 +130,7 @@ impl Seat {
             pointer_x: 0,
             pointer_y: 0,
             pointer_window: None,
+            layer: None,
         }
     }
 }

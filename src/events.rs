@@ -113,6 +113,18 @@ impl Dispatch<RiverSeatV1, ()> for AppData {
                     }
                 }
             }
+            SeatEvent::WindowInteraction { window } => {
+                // A pointer button press / touch on a window: focus it,
+                // regardless of focus-follows-mouse.
+                if let Some(wid) = state.find_window_by_proxy(&window) {
+                    if let Some(tag) = state.find_window(wid).map(|w| w.tag) {
+                        if let Some(o) = state.active_output() {
+                            state.outputs[o].focused_window = Some(wid);
+                            state.outputs[o].active_mask |= 1u32 << tag;
+                        }
+                    }
+                }
+            }
             SeatEvent::Removed {} => {
                 state.seats.retain(|s| s.proxy.id() != sid);
             }

@@ -34,3 +34,26 @@ pub mod xkb_bindings {
 
     wayland_scanner::generate_client_code!("./protocols/stable/river-xkb-bindings-v1.xml");
 }
+
+pub mod layer_shell {
+    //! river-layer-shell-v1 (client side). Binding this global signals to the
+    //! compositor that the window manager supports wlr-layer-shell, allowing
+    //! clients (quickshell bar, swaybg background) to map layer surfaces.
+    use wayland_client;
+    use wayland_client::protocol::*;
+    // The generated client code references river_output_v1 / river_seat_v1 from
+    // river-window-management-v1; bring them into scope for the macro.
+    #[allow(unused_imports)]
+    use crate::protocols::wm::*;
+    #[allow(unused_imports)]
+    use crate::protocols::wm::__interfaces::*;
+
+    pub mod __interfaces {
+        use wayland_client::protocol::__interfaces::*;
+        use crate::protocols::wm::__interfaces::*;
+        wayland_scanner::generate_interfaces!("./protocols/stable/river-layer-shell-v1.xml");
+    }
+    use self::__interfaces::*;
+
+    wayland_scanner::generate_client_code!("./protocols/stable/river-layer-shell-v1.xml");
+}

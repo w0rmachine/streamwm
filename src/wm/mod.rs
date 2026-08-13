@@ -18,6 +18,36 @@ pub fn on_manage_start(data: &mut AppData, wm: &RiverWindowManagerV1) {
         }
     }
 
+    // Set a default layer-shell output once (required so clients with no
+    // explicit output preference can map their surfaces).
+    if !data.layer_default_set {
+        let state = data.state.borrow();
+        if let Some(out) = state.outputs.first() {
+            if let Some(layer) = &out.layer {
+                layer.set_default();
+                data.layer_default_set = true;
+            }
+        }
+    }
+
+    // Route keyboard focus to the focused window of the focused output.
+    {
+        let state = data.state.borrow();
+        let focused_proxy = state.active_output().and_then(|o| {
+            state.outputs[o]
+                .focused_window
+                .and_then(|fid| state.find_window(fid))
+                .map(|w| w.proxy.clone())
+        });
+        for seat in state.seats.iter() {
+            if let Some(ref proxy) = focused_proxy {
+                seat.proxy.focus_window(proxy);
+            } else {
+                seat.proxy.clear_focus();
+            }
+        }
+    }
+
     // Compute geometries (immutable borrow), then propose (mutable borrow).
     let geometries = {
         let state = data.state.borrow();
