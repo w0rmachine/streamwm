@@ -1,0 +1,24 @@
+[package]
+name = "streamwm"
+version = "0.1.0"
+edition = "2021"
+description = "A tiling window manager for the river Wayland compositor"
+license = "MIT"
+
+[[bin]]
+name = "streamwm"
+path = "src/main.rs"
+
+[dependencies]
+wayland-client = "0.31"
+wayland-backend = "0.3"
+wayland-scanner = "0.31"
+wayland-protocols = { version = "0.32", features = ["client"] }
+bitflags = "2"
+nix = { version = "0.29", features = ["socket", "poll", "signal"] }
+zbus = { version = "5", features = ["blocking"] }
+log = "0.4"
+env_logger = "0.11"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
