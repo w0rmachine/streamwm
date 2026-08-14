@@ -55,10 +55,31 @@ fn compute_output(state: &State, output_idx: usize, config: &Config) -> Vec<(u32
 
     let gap = config.gap as i32;
 
-    let area_x = output.x + gap;
-    let area_y = output.y + gap;
-    let area_w = (output.width as i32 - gap * 2).max(0) as u32;
-    let area_h = (output.height as i32 - gap * 2).max(0) as u32;
+    let base_x = if output.usable_width > 0 || output.usable_height > 0 {
+        output.usable_x
+    } else {
+        output.x
+    };
+    let base_y = if output.usable_width > 0 || output.usable_height > 0 {
+        output.usable_y
+    } else {
+        output.y
+    };
+    let base_w = if output.usable_width > 0 || output.usable_height > 0 {
+        output.usable_width
+    } else {
+        output.width
+    };
+    let base_h = if output.usable_width > 0 || output.usable_height > 0 {
+        output.usable_height
+    } else {
+        output.height
+    };
+
+    let area_x = base_x + gap;
+    let area_y = base_y + gap;
+    let area_w = (base_w as i32 - gap * 2).max(0) as u32;
+    let area_h = (base_h as i32 - gap * 2).max(0) as u32;
 
     compute_tiling(
         &ids,
@@ -68,7 +89,7 @@ fn compute_output(state: &State, output_idx: usize, config: &Config) -> Vec<(u32
             width: area_w,
             height: area_h,
         },
-        output.y + output.height as i32,
+        base_y + base_h as i32,
         gap,
     )
 }
