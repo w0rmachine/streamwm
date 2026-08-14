@@ -91,6 +91,8 @@ pub fn default_bindings(config: &crate::config::Config) -> Vec<(String, String, 
         ("v".into(), "".into(), "float".into()),
         ("j".into(), "".into(), "focus_next".into()),
         ("k".into(), "".into(), "focus_prev".into()),
+        ("h".into(), "".into(), "focus_prev_output".into()),
+        ("l".into(), "".into(), "focus_next_output".into()),
         ("space".into(), "".into(), "cycle_layout".into()),
     ];
     for t in 0..=9u32 {
@@ -246,6 +248,24 @@ fn run_action(data: &mut AppData, action: &str) {
                         needs_manage = true;
                     }
                 }
+            }
+        }
+        "focus_next_output" | "focus_prev_output" => {
+            // Move seat focus to the next/previous output (by index), including
+            // empty outputs. Without this, an output with no windows can never
+            // gain focus, so newly spawned windows always land on the first
+            // output that ever had focus.
+            let mut s = data.state.borrow_mut();
+            let n = s.outputs.len();
+            if n > 1 {
+                let cur = s.focused_output.unwrap_or(0);
+                let next = if name == "focus_next_output" {
+                    (cur + 1) % n
+                } else {
+                    (cur + n - 1) % n
+                };
+                s.focused_output = Some(next);
+                needs_manage = true;
             }
         }
         "cycle_layout" => {

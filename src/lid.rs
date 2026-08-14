@@ -1,14 +1,24 @@
-//! Lid-switch / clamshell handling via systemd logind.
+//! Lid-switch / clamshell handling.
 //!
-//! Listens to logind's `PrepareForSleep` signal (and, implicitly, lid-switch
-//! inhibition state) to switch kanshi output profiles when the lid opens/closes
-//! in clamshell mode. The exact profiles are configurable via `[lid]`.
+//! Switches kanshi output profiles when the laptop lid opens or closes. The
+//! previous implementation listened to logind's `PrepareForSleep` signal, but
+//! that only fires when the machine actually suspends — closing the lid in a
+//! docked clamshell setup (where `HandleLidSwitchDocked=ignore`) produced no
+//! event at all.
+//!
+//! Instead we poll the ACPI lid state file (`/proc/acpi/button/lid/LID0/state`,
+//! with a `LID` fallback) and react to open<->closed _transitions_. This is
+//! simple, dependency-free, and works regardless of logind's suspend policy.
 
 use std::thread;
+use std::time::Duration;
 
 use crate::config::Lid;
 
-/// Spawn a background thread that listens for logind lid/sleep events and
+/// Poll interval for the lid state file.
+const POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Spawn a background thread that watches lid open/close transitions and
 /// switches kanshi profiles accordingly.
 pub fn spawn(config: Lid) {
     if !config.enable {
@@ -22,58 +32,56 @@ pub fn spawn(config: Lid) {
 }
 
 fn run(config: &Lid) -> Result<(), Box<dyn std::error::Error>> {
-    use zbus::blocking::Connection;
+    log::info!("lid listener: polling ACPI lid state");
 
-    let conn = Connection::system()?;
-    let proxy = zbus::blocking::Proxy::new(
-        &conn,
-        "org.freedesktop.login1",
-        "/org/freedesktop/login1",
-        "org.freedesktop.login1.Manager",
-    )?;
+    // Seed the previous state so we only react to *transitions*, not the
+    // initial state at startup.
+    let mut prev: Option<bool> = None;
 
-    // Subscribe to the PrepareForSleep signal (bool: true = about to sleep).
-    log::info!("lid listener: watching logind PrepareForSleep");
-    let signal = proxy.receive_signal("PrepareForSleep")?;
+    loop {
+        let closed = lid_is_closed()?;
 
-    for _ in signal {
-        handle_lid_event(config)?;
+        if let Some(prev) = prev {
+            if closed != prev {
+                apply_profile(config, closed)?;
+            }
+        }
+        prev = Some(closed);
+
+        thread::sleep(POLL_INTERVAL);
     }
-
-    Ok(())
 }
 
-fn handle_lid_event(config: &Lid) -> Result<(), Box<dyn std::error::Error>> {
-    // Query current lid state to decide which profile to apply.
-    let lid_closed = lid_is_closed()?;
-
-    let profile = if lid_closed {
+/// Switch kanshi to the close/open profile for the given lid state.
+fn apply_profile(config: &Lid, closed: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let profile = if closed {
         &config.close_profile
     } else {
         &config.open_profile
     };
 
-    log::info!("lid state: closed={lid_closed}; switching kanshi to `{profile}`");
+    log::info!("lid state: closed={closed}; switching kanshi to `{profile}`");
     crate::wm::spawn::spawn(&format!("kanshictl switch {profile}"));
     Ok(())
 }
 
-/// Read the current lid state from /proc/acpi/button/lid or logind.
+/// Read the current lid state from /proc/acpi/button/lid.
 fn lid_is_closed() -> Result<bool, Box<dyn std::error::Error>> {
-    // Try the procfs ACPI lid state file first (most laptops expose it).
     for path in [
         "/proc/acpi/button/lid/LID0/state",
         "/proc/acpi/button/lid/LID/state",
     ] {
         if let Ok(text) = std::fs::read_to_string(path) {
-            if text.to_ascii_lowercase().contains("closed") {
+            let lower = text.to_ascii_lowercase();
+            if lower.contains("closed") {
                 return Ok(true);
             }
-            if text.to_ascii_lowercase().contains("open") {
+            if lower.contains("open") {
                 return Ok(false);
             }
         }
     }
-    // Fallback: assume open.
+    // If the lid state file is unavailable, treat the lid as open. Returning an
+    // error would kill the listener; a missing procfs entry is not fatal.
     Ok(false)
 }
