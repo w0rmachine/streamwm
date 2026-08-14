@@ -86,6 +86,11 @@ pub struct Output {
     pub y: i32,
     pub width: u32,
     pub height: u32,
+    /// Area left after layer-shell exclusive zones, in global coordinates.
+    pub usable_x: i32,
+    pub usable_y: i32,
+    pub usable_width: u32,
+    pub usable_height: u32,
     /// Bitmask of active (visible) tag ids.
     pub active_mask: u32,
     /// Bitmask of occupied (non-empty) tag ids.
@@ -112,6 +117,10 @@ impl Output {
             y: 0,
             width: 0,
             height: 0,
+            usable_x: 0,
+            usable_y: 0,
+            usable_width: 0,
+            usable_height: 0,
             active_mask: 1, // tag 0 active by default
             occupied_mask: 0,
             urgent_mask: 0,
