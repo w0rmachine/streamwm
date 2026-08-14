@@ -161,10 +161,12 @@ fn run_action(data: &mut AppData, action: &str) {
         "spawn_terminal" => crate::wm::spawn::spawn(&data.config.terminal),
         "spawn_launcher" => crate::wm::spawn::spawn(&data.config.launcher),
         "spawn" => {
-            if data.config.allow_spawn {
-                if let Some(cmd) = arg {
-                    crate::wm::spawn::spawn(cmd);
-                }
+            // Keybindings fire only on a physical keypress, so a config-declared
+            // `spawn` binding is trusted. The `allow_spawn` guard governs only
+            // the *socket* control path (status.rs), where arbitrary local
+            // processes can inject commands.
+            if let Some(cmd) = arg {
+                crate::wm::spawn::spawn(cmd);
             }
         }
         "close" => {
