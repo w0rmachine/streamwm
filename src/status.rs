@@ -69,6 +69,7 @@ pub enum Command {
     FocusTag(u32, Option<String>),
     SendToTag(u32),
     FocusOutput(String),
+    FocusWindow(String, Option<String>),
     Spawn(String),
     Quit,
     /// Notify the loop that a command arrived; it will `manage_dirty`.
@@ -256,6 +257,14 @@ fn parse_command_value(cmd: &serde_json::Value) -> Option<Command> {
             .get("output")
             .and_then(|v| v.as_str())
             .map(|o| Command::FocusOutput(o.to_string())),
+        "focus_window" => {
+            let app_id = cmd.get("app_id").and_then(|v| v.as_str())?;
+            let title = cmd
+                .get("title")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            Some(Command::FocusWindow(app_id.to_string(), title))
+        }
         "spawn" => cmd
             .get("command")
             .and_then(|v| v.as_str())
@@ -288,6 +297,32 @@ pub fn apply_command(data: &mut crate::connection::AppData, cmd: Command) {
             let mut s = data.state.borrow_mut();
             if let Some(idx) = s.find_output_by_name(&name) {
                 s.focused_output = Some(idx);
+            }
+        }
+        Command::FocusWindow(app_id, title) => {
+            // Focus a specific window (e.g. selected in the quickshell window
+            // picker). Switch focus/output/tag to the window's tag so it is
+            // visible, then make it the focused window. This lets floating
+            // windows — which the picker lists via foreign-toplevel — be
+            // focused through streamwm instead of being overridden by the next
+            // manage pass.
+            let mut s = data.state.borrow_mut();
+            let target = s
+                .windows
+                .iter()
+                .find(|w| {
+                    w.app_id.as_deref() == Some(app_id.as_str())
+                        && (title.is_none()
+                            || title.as_deref().is_none()
+                            || w.title.as_deref() == title.as_deref())
+                })
+                .map(|w| (w.id, w.tag));
+            if let Some((wid, tag)) = target {
+                if let Some(output) = s.tag_owner(tag) {
+                    s.focused_output = Some(output);
+                    s.outputs[output].active_tag = tag;
+                    s.outputs[output].focused_window = Some(wid);
+                }
             }
         }
         Command::Spawn(cmd_str) => {
@@ -340,6 +375,18 @@ mod tests {
         assert_eq!(
             parse_command_value(&json!({ "cmd": "focus_output", "output": "eDP-1" })),
             Some(Command::FocusOutput("eDP-1".into()))
+        );
+        assert_eq!(
+            parse_command_value(&json!({ "cmd": "focus_window", "app_id": "foot" })),
+            Some(Command::FocusWindow("foot".into(), None))
+        );
+        assert_eq!(
+            parse_command_value(&json!({
+                "cmd": "focus_window",
+                "app_id": "foot",
+                "title": "Term"
+            })),
+            Some(Command::FocusWindow("foot".into(), Some("Term".into())))
         );
         assert_eq!(
             parse_command_value(&json!({ "cmd": "spawn", "command": "foot" })),

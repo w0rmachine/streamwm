@@ -70,6 +70,8 @@ fn compute_output(state: &State, output_idx: usize, config: &Config) -> Vec<(u32
     let area_w = (base_w as i32 - gap * 2).max(0) as u32;
     let area_h = (base_h as i32 - gap * 2).max(0) as u32;
 
+    let master_fraction = state.active_master_fraction(output_idx);
+
     compute_tiling(
         &ids,
         Geometry {
@@ -80,7 +82,7 @@ fn compute_output(state: &State, output_idx: usize, config: &Config) -> Vec<(u32
         },
         base_y + base_h as i32,
         gap,
-        state.master_fraction,
+        master_fraction,
     )
 }
 
@@ -178,17 +180,44 @@ pub fn render_all_run(data: &mut AppData) {
             .collect()
     };
 
+    // Apply visibility, position, borders in two passes so that floating windows
+    // are always raised above tiled windows regardless of their creation order.
+    // The render list is order-sensitive: the last node placed on top ends above
+    // everything else, so we place tiled windows first and floats last.
+    //
+    // First hide every invisible window, then position/show in stacking order.
     let mut state = data.state.borrow_mut();
-    for (wid, visible, geom) in decisions {
+    for (wid, visible, _geom) in decisions.iter().copied() {
+        if !visible {
+            if let Some(window) = state.find_window_mut(wid) {
+                window.proxy.hide();
+            }
+        }
+    }
+
+    // Order: tiled windows first, then floating windows on top.
+    let mut order: Vec<u32> = decisions
+        .iter()
+        .filter(|(_, visible, geom)| *visible && geom.is_some())
+        .map(|(wid, _, _)| *wid)
+        .collect();
+    order.extend(
+        decisions
+            .iter()
+            .filter(|(_, visible, geom)| *visible && geom.is_none())
+            .map(|(wid, _, _)| *wid),
+    );
+
+    for wid in order {
         let Some(window) = state.find_window_mut(wid) else {
             continue;
         };
+        let geom = decisions
+            .iter()
+            .find(|(dwid, _, _)| *dwid == wid)
+            .map(|(_, _, g)| *g)
+            .unwrap_or(None);
         let is_focused = focused == Some(wid);
-
-        if !visible {
-            window.proxy.hide();
-            continue;
-        }
 
         // Position via the render node.
         if let Some(node) = &window.node {

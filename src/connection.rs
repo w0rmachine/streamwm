@@ -117,8 +117,7 @@ impl AppData {
 
 pub fn run(config: &Config) -> Result<(), String> {
     let conn = wayland_client::Connection::connect_to_env().map_err(|e| format!("connect: {e}"))?;
-    let state = Rc::new(RefCell::new(State::new()));
-    state.borrow_mut().master_fraction = config.master_fraction.clamp(0.1, 0.9);
+    let state = Rc::new(RefCell::new(State::new(config.master_fraction.clamp(0.1, 0.9))));
     let mut data = AppData::new(state, Rc::new(config.clone()));
 
     let (globals, mut event_queue) =

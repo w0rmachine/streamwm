@@ -21,13 +21,17 @@ pub struct Tag {
     pub output: Option<usize>,
     /// Per-tag label (None = default numeric label).
     pub label: Option<String>,
+    /// Master fraction of this tag's tiling layout, adjustable independently
+    /// per tag in resize mode.
+    pub master_fraction: f64,
 }
 
 impl Tag {
-    fn unassigned() -> Tag {
+    fn unassigned(master_fraction: f64) -> Tag {
         Tag {
             output: None,
             label: None,
+            master_fraction,
         }
     }
 }
@@ -185,23 +189,48 @@ pub struct State {
     pub tags: Vec<Tag>,
     /// The output index that currently has seat focus.
     pub focused_output: Option<usize>,
-    /// Live master fraction for the tiling layout (adjustable in resize mode).
-    pub master_fraction: f64,
+    /// Default master fraction applied to newly created tags.
+    pub default_master_fraction: f64,
     /// Whether the WM is in resize mode (arrow keys resize the layout).
     pub resize_mode: bool,
 }
 
 impl State {
-    pub fn new() -> State {
+    pub fn new(default_master_fraction: f64) -> State {
         State {
             outputs: Vec::new(),
             seats: Vec::new(),
             windows: Vec::new(),
-            tags: (0..NUM_TAGS).map(|_| Tag::unassigned()).collect(),
+            tags: (0..NUM_TAGS)
+                .map(|_| Tag::unassigned(default_master_fraction))
+                .collect(),
             focused_output: None,
-            master_fraction: 0.55,
+            default_master_fraction,
             resize_mode: false,
         }
+    }
+
+    /// Master fraction for `tag`'s layout (per-tag; falls back to the default).
+    pub fn master_fraction(&self, tag: usize) -> f64 {
+        self.tags
+            .get(tag)
+            .map(|t| t.master_fraction)
+            .unwrap_or(self.default_master_fraction)
+    }
+
+    /// Set the master fraction for `tag`'s layout, clamped to the legal range.
+    pub fn set_master_fraction(&mut self, tag: usize, fraction: f64) {
+        if let Some(t) = self.tags.get_mut(tag) {
+            t.master_fraction = fraction.clamp(0.1, 0.9);
+        }
+    }
+
+    /// Master fraction for the active tag of `output_idx`.
+    pub fn active_master_fraction(&self, output_idx: usize) -> f64 {
+        self.outputs
+            .get(output_idx)
+            .map(|o| self.master_fraction(o.active_tag))
+            .unwrap_or(self.default_master_fraction)
     }
 
     pub fn find_window(&self, id: u32) -> Option<&Window> {
@@ -403,5 +432,23 @@ mod tests {
         let mut owners = [Some(0), Some(1), None];
         remap_tag_owners(&mut owners, 0, 0);
         assert_eq!(owners, [None, None, None]);
+    }
+
+    #[test]
+    fn master_fraction_is_per_tag_and_clamped() {
+        let mut state = State::new(0.55);
+        assert_eq!(state.master_fraction(0), 0.55);
+        assert_eq!(state.master_fraction(8), 0.55);
+
+        // Changing one tag does not affect another.
+        state.set_master_fraction(0, 0.8);
+        assert_eq!(state.master_fraction(0), 0.8);
+        assert_eq!(state.master_fraction(1), 0.55);
+
+        // Out-of-range fractions are clamped.
+        state.set_master_fraction(2, 5.0);
+        assert_eq!(state.master_fraction(2), 0.9);
+        state.set_master_fraction(2, -1.0);
+        assert_eq!(state.master_fraction(2), 0.1);
     }
 }

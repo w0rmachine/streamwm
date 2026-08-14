@@ -376,9 +376,15 @@ fn run_action(data: &mut AppData, action: &str) {
             if !s.resize_mode {
                 return;
             }
+            // Resize the master fraction of the *active tag*, so the split is
+            // remembered per tag rather than shared across the whole session.
             let step = data.config.resize_step;
             let delta = if name == "resize_step_right" { step } else { -step };
-            s.master_fraction = (s.master_fraction + delta).clamp(0.1, 0.9);
+            if let Some(o) = s.active_output() {
+                let active_tag = s.outputs[o].active_tag;
+                let cur = s.master_fraction(active_tag);
+                s.set_master_fraction(active_tag, cur + delta);
+            }
             needs_manage = true;
         }
         "quit" => {
