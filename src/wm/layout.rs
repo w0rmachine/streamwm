@@ -30,20 +30,12 @@ pub fn compute_all(state: &State, config: &Config) -> Vec<(u32, Geometry)> {
 /// Visible (non-floating) windows for an output, in master+stack order.
 fn visible_windows(state: &State, output_idx: usize) -> Vec<u32> {
     let active = state.outputs[output_idx].active_mask;
-    let mut ids: Vec<u32> = state
+    state
         .windows
         .iter()
         .filter(|w| w.output == output_idx && (active >> w.tag) & 1 == 1 && !w.floating)
         .map(|w| w.id)
-        .collect();
-    // Focused window first (becomes the master).
-    if let Some(fid) = state.outputs[output_idx].focused_window {
-        if let Some(pos) = ids.iter().position(|id| *id == fid) {
-            let w = ids.remove(pos);
-            ids.insert(0, w);
-        }
-    }
-    ids
+        .collect()
 }
 
 fn compute_output(state: &State, output_idx: usize, config: &Config) -> Vec<(u32, Geometry)> {

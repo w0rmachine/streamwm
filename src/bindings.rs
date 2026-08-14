@@ -81,10 +81,12 @@ fn parse_modifiers(s: &str, config_modifier: &str) -> Modifiers {
 
 /// Build the list of (keysym, modifiers, action) bindings.
 pub fn default_bindings(config: &crate::config::Config) -> Vec<(String, String, String)> {
+    let modified_shift = format!("{}+shift", config.modifier);
     let mut binds: Vec<(String, String, String)> = vec![
         ("Return".into(), "".into(), "spawn_terminal".into()),
         ("d".into(), "".into(), "spawn_launcher".into()),
         ("q".into(), "".into(), "close".into()),
+        ("E".into(), config.modifier.clone(), "quit".into()),
         ("f".into(), "".into(), "fullscreen".into()),
         ("v".into(), "".into(), "float".into()),
         ("j".into(), "".into(), "focus_next".into()),
@@ -94,7 +96,7 @@ pub fn default_bindings(config: &crate::config::Config) -> Vec<(String, String, 
     for t in 0..=9u32 {
         let key = char::from_digit(t, 10).unwrap().to_string();
         binds.push((key.clone(), "".into(), format!("focus_tag:{t}")));
-        binds.push((key, "shift".into(), format!("send_to_tag:{t}")));
+        binds.push((key, modified_shift.clone(), format!("send_to_tag:{t}")));
     }
     for b in &config.bindings {
         let action = match &b.arg {
@@ -328,11 +330,14 @@ mod tests {
             .iter()
             .any(|(_, _, action)| action == "spawn_terminal"));
         assert!(bindings.iter().any(|(_, _, action)| action == "focus_next"));
+        assert!(bindings.iter().any(|(key, modifiers, action)| key == "E"
+            && modifiers == "super"
+            && action == "quit"));
         assert!(bindings.iter().any(|(key, modifiers, action)| key == "0"
             && modifiers.is_empty()
             && action == "focus_tag:0"));
         assert!(bindings.iter().any(|(key, modifiers, action)| key == "9"
-            && modifiers == "shift"
+            && modifiers == "super+shift"
             && action == "send_to_tag:9"));
     }
 

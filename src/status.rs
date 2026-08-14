@@ -257,8 +257,10 @@ pub fn apply_command(data: &mut crate::connection::AppData, cmd: Command) {
                 if let Some(fid) = fid {
                     if let Some(w) = s.find_window(fid) {
                         let tag = w.tag;
-                        // Ensure the tag is active.
-                        s.outputs[idx].active_mask = 1u32 << tag;
+                        // Ensure the tag is active without collapsing a multi-tag view.
+                        if (s.outputs[idx].active_mask >> tag) & 1 == 0 {
+                            s.outputs[idx].active_mask = 1u32 << tag;
+                        }
                     }
                 }
             }
