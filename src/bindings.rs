@@ -247,11 +247,21 @@ fn run_action(data: &mut AppData, action: &str) {
         }
         "focus_tag" => {
             if let Some(tag) = arg.and_then(|t| t.parse::<usize>().ok()) {
-                let mut s = data.state.borrow_mut();
-                if let Some(o) = s.active_output() {
-                    s.focus_tag(o, tag);
-                    needs_manage = true;
+                // If this tag lives on a different output, focusing it moves
+                // focus (and the pointer) to that output.
+                let target = {
+                    let s = data.state.borrow();
+                    s.active_output()
+                        .and_then(|o| s.tag_owner(tag).filter(|&owner| owner != o))
+                };
+                {
+                    let mut s = data.state.borrow_mut();
+                    if let Some(o) = s.active_output() {
+                        s.focus_tag(o, tag);
+                        needs_manage = true;
+                    }
                 }
+                data.pending_pointer_warp = target;
             }
         }
         "send_to_tag" => {
@@ -292,16 +302,24 @@ fn run_action(data: &mut AppData, action: &str) {
             // empty outputs. Without this, an output with no windows can never
             // gain focus, so newly spawned windows always land on the first
             // output that ever had focus.
-            let mut s = data.state.borrow_mut();
-            let n = s.outputs.len();
-            if n > 1 {
-                let cur = s.focused_output.unwrap_or(0);
-                let next = if name == "focus_next_output" {
-                    (cur + 1) % n
+            let next = {
+                let mut s = data.state.borrow_mut();
+                let n = s.outputs.len();
+                if n > 1 {
+                    let cur = s.focused_output.unwrap_or(0);
+                    let next = if name == "focus_next_output" {
+                        (cur + 1) % n
+                    } else {
+                        (cur + n - 1) % n
+                    };
+                    s.focused_output = Some(next);
+                    Some(next)
                 } else {
-                    (cur + n - 1) % n
-                };
-                s.focused_output = Some(next);
+                    None
+                }
+            };
+            if let Some(next) = next {
+                data.pending_pointer_warp = Some(next);
                 needs_manage = true;
             }
         }

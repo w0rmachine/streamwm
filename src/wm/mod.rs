@@ -159,6 +159,20 @@ pub fn on_manage_start(data: &mut AppData, wm: &RiverWindowManagerV1) {
         binding.enable();
     }
 
+    // Warp the pointer to the target output after a keyboard-driven output or
+    // cross-output tag focus, so focus-follows-mouse does not snap focus back
+    // to the output the pointer is still on.
+    if let Some(target) = data.pending_pointer_warp.take() {
+        let state = data.state.borrow();
+        if let Some(output) = state.outputs.get(target) {
+            let cx = output.x + output.width as i32 / 2;
+            let cy = output.y + output.height as i32 / 2;
+            for seat in state.seats.iter() {
+                seat.proxy.pointer_warp(cx, cy);
+            }
+        }
+    }
+
     wm.manage_finish();
 }
 

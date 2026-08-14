@@ -64,6 +64,9 @@ pub struct AppData {
     pub pending_op: Option<PointerOp>,
     /// Whether an op_end is queued for the next manage sequence.
     pub op_end_requested: bool,
+    /// Output index to warp the pointer to at the next manage sequence, when
+    /// focus moved to a different output via keyboard (tag/output switch).
+    pub pending_pointer_warp: Option<usize>,
 }
 
 /// An in-progress interactive pointer operation for a floating window.
@@ -107,6 +110,7 @@ impl AppData {
             pointer_op: None,
             pending_op: None,
             op_end_requested: false,
+            pending_pointer_warp: None,
         }
     }
 }
