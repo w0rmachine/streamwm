@@ -33,13 +33,29 @@ impl Dispatch<RiverWindowV1, ()> for AppData {
                 state.windows.retain(|w| w.proxy.id() != oid);
             }
             WindowEvent::AppId { app_id } => {
+                // Auto-float windows whose app id is in the configured
+                // "never tile" list (password forms, calculator, Google
+                // Meet call window, ...). Seed a centered floating position on
+                // the window's output so it doesn't appear at the global
+                // origin (output 0).
+                let should_float = app_id
+                    .as_deref()
+                    .is_some_and(|a| data.config.is_floating_app(a));
+                let center = if should_float {
+                    state
+                        .find_window(id)
+                        .and_then(|w| state.tag_owner(w.tag))
+                        .and_then(|o| state.outputs.get(o))
+                        .map(|out| (out.x + out.width as i32 / 2, out.y + out.height as i32 / 2))
+                } else {
+                    None
+                };
                 if let Some(w) = state.find_window_mut(id) {
-                    // Auto-float windows whose app id is in the configured
-                    // "never tile" list (password forms, calculator, Google
-                    // Meet call window, ...).
-                    if let Some(app_id) = app_id.as_deref() {
-                        if data.config.is_floating_app(app_id) {
-                            w.floating = true;
+                    if should_float {
+                        w.floating = true;
+                        if let Some((cx, cy)) = center {
+                            w.float_x = cx - w.float_w as i32 / 2;
+                            w.float_y = cy - w.float_h as i32 / 2;
                         }
                     }
                     w.app_id = app_id;

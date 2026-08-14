@@ -287,14 +287,44 @@ fn run_action(data: &mut AppData, action: &str) {
             }
         }
         "float" => {
-            let mut s = data.state.borrow_mut();
-            if let Some(o) = s.active_output() {
-                if let Some(fid) = s.outputs[o].focused_window {
+            let fid = {
+                let s = data.state.borrow();
+                s.active_output().and_then(|o| s.outputs[o].focused_window)
+            };
+            if let Some(fid) = fid {
+                let turning_on = {
+                    let s = data.state.borrow();
+                    s.find_window(fid).map(|w| !w.floating).unwrap_or(false)
+                };
+                if turning_on {
+                    // Seed the floating geometry from the window's current
+                    // tiling cell so it doesn't jump to the output origin
+                    // (output 0, 0,0) when floated.
+                    let config = data.config.clone();
+                    let geom = {
+                        let s = data.state.borrow();
+                        crate::wm::layout::compute_all(&s, config.as_ref())
+                            .into_iter()
+                            .find(|(wid, _)| *wid == fid)
+                            .map(|(_, g)| g)
+                    };
+                    let mut s = data.state.borrow_mut();
                     if let Some(w) = s.find_window_mut(fid) {
-                        w.floating = !w.floating;
-                        needs_manage = true;
+                        if let Some(g) = geom {
+                            w.float_x = g.x;
+                            w.float_y = g.y;
+                            w.float_w = g.width;
+                            w.float_h = g.height;
+                        }
+                        w.floating = true;
+                    }
+                } else {
+                    let mut s = data.state.borrow_mut();
+                    if let Some(w) = s.find_window_mut(fid) {
+                        w.floating = false;
                     }
                 }
+                needs_manage = true;
             }
         }
         "focus_next_output" | "focus_prev_output" => {
