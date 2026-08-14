@@ -17,6 +17,14 @@ use crate::config::Lid;
 
 /// Poll interval for the lid state file.
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
+/// Delay after the lid opens before switching kanshi. The ACPI "open" state
+/// fires before the panel's DRM connector comes back up, so switching
+/// immediately makes kanshi apply the profile while the panel is still
+/// "disconnected" and leave it disabled.
+const OPEN_DEBOUNCE: Duration = Duration::from_millis(1500);
+/// Additional wait before a retry switch, to catch the race where kanshi
+/// applies the open profile before the panel is ready.
+const OPEN_RETRY_DELAY: Duration = Duration::from_millis(2000);
 
 /// Spawn a background thread that watches lid open/close transitions and
 /// switches kanshi profiles accordingly.
@@ -43,7 +51,17 @@ fn run(config: &Lid) -> Result<(), Box<dyn std::error::Error>> {
 
         if let Some(prev) = prev {
             if closed != prev {
-                apply_profile(config, closed)?;
+                if closed {
+                    apply_profile(config, true)?;
+                } else {
+                    // Reopening: wait for the panel to reconnect, switch, then
+                    // retry once to catch the race where kanshi applies the
+                    // profile before the panel is ready.
+                    thread::sleep(OPEN_DEBOUNCE);
+                    apply_profile(config, false)?;
+                    thread::sleep(OPEN_RETRY_DELAY);
+                    apply_profile(config, false)?;
+                }
             }
         }
         prev = Some(closed);

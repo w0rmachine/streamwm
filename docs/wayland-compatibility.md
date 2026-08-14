@@ -49,17 +49,22 @@ Current streamwm flow:
 
 ## Tag And Output Model
 
-Tags are per output. A window stores:
+Tags are global and shared across outputs. Each tag is owned by at most one
+output, and a window stores:
 
-- `output`: index into `State.outputs`
-- `tag`: tag id `0..=9`
+- `tag`: global tag id `0..=8` (displayed `1..=9`)
+- its output is derived from the tag's owner
 
-Layout, focus cycling, occupied masks, status snapshots, and floating visibility
-must filter on both fields. Tag `1` on output A is not tag `1` on output B.
+An output shows a single active tag. Focusing an unassigned tag creates
+(assigns) it on the focused output; focusing a tag owned by another output
+switches focus to that output and shows the tag there. When an output is
+removed, its tags migrate to the first remaining output.
 
-New windows are assigned to the focused output and that output's first active
-tag before the first manage pass. This prevents a new window from appearing on
-the wrong tag/output.
+Layout, focus cycling, owned/occupied masks, status snapshots, and floating
+visibility all derive a window's output from its tag's owner.
+
+New windows are assigned to the focused output's active tag before the first
+manage pass. This prevents a new window from appearing on the wrong tag/output.
 
 ## Output Names
 

@@ -92,25 +92,9 @@ impl Dispatch<RiverOutputV1, ()> for AppData {
                 }
             }
             OutputEvent::Removed => {
-                state.outputs.remove(idx);
-                let outputs_empty = state.outputs.is_empty();
-                for w in state.windows.iter_mut() {
-                    if outputs_empty || w.output == idx {
-                        w.output = 0;
-                    } else if w.output > idx {
-                        w.output -= 1;
-                    }
-                }
-                // Recompute focus if the focused output was removed.
-                if state.focused_output == Some(idx) {
-                    state.focused_output = if state.outputs.is_empty() {
-                        None
-                    } else {
-                        Some(0)
-                    };
-                } else if state.focused_output.is_some_and(|focused| focused > idx) {
-                    state.focused_output = state.focused_output.map(|focused| focused - 1);
-                }
+                // Migrate this output's tags to the first remaining output and
+                // recompute focus.
+                state.remove_output(idx);
             }
         }
     }
@@ -164,15 +148,13 @@ impl Dispatch<RiverSeatV1, ()> for AppData {
                 if data.config.focus_follows_mouse {
                     if let Some(wid) = state.find_window_by_proxy(&window) {
                         // Focus switches to the window under the pointer, and
-                        // thus to its output/tag.
-                        if let Some((output, tag)) =
-                            state.find_window(wid).map(|w| (w.output, w.tag))
-                        {
-                            if output < state.outputs.len() {
-                                state.focused_output = Some(output);
-                                state.outputs[output].focused_window = Some(wid);
-                                if (state.outputs[output].active_mask >> tag) & 1 == 0 {
-                                    state.outputs[output].active_mask = 1u32 << tag;
+                        // thus to its tag's output.
+                        if let Some(tag) = state.find_window(wid).map(|w| w.tag) {
+                            if let Some(output) = state.tag_owner(tag) {
+                                if output < state.outputs.len() {
+                                    state.focused_output = Some(output);
+                                    state.outputs[output].focused_window = Some(wid);
+                                    state.outputs[output].active_tag = tag;
                                 }
                             }
                         }
@@ -183,12 +165,12 @@ impl Dispatch<RiverSeatV1, ()> for AppData {
                 // A pointer button press / touch on a window: focus it,
                 // regardless of focus-follows-mouse.
                 if let Some(wid) = state.find_window_by_proxy(&window) {
-                    if let Some((output, tag)) = state.find_window(wid).map(|w| (w.output, w.tag)) {
-                        if output < state.outputs.len() {
-                            state.focused_output = Some(output);
-                            state.outputs[output].focused_window = Some(wid);
-                            if (state.outputs[output].active_mask >> tag) & 1 == 0 {
-                                state.outputs[output].active_mask = 1u32 << tag;
+                    if let Some(tag) = state.find_window(wid).map(|w| w.tag) {
+                        if let Some(output) = state.tag_owner(tag) {
+                            if output < state.outputs.len() {
+                                state.focused_output = Some(output);
+                                state.outputs[output].focused_window = Some(wid);
+                                state.outputs[output].active_tag = tag;
                             }
                         }
                     }

@@ -220,9 +220,9 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppData {
                 let tag = state
                     .outputs
                     .get(output)
-                    .map(|o| o.first_active_tag())
+                    .map(|o| o.active_tag)
                     .unwrap_or(0);
-                state.windows.push(Window::new(id, output, tag));
+                state.windows.push(Window::new(id, tag));
                 if let Some(window) = state.windows.last() {
                     let wid = window.id;
                     if let Some(out) = state.outputs.get_mut(output) {
@@ -233,8 +233,10 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppData {
             WmEvent::Output { id } => {
                 let mut s = data.state.borrow_mut();
                 s.outputs.push(Output::new(id));
+                let new_idx = s.outputs.len() - 1;
+                s.assign_initial_tag(new_idx);
                 if s.focused_output.is_none() {
-                    s.focused_output = Some(s.outputs.len() - 1);
+                    s.focused_output = Some(new_idx);
                 }
                 // Create layer-shell output state for this output.
                 let layer = data.layer_shell.clone();

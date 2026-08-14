@@ -15,7 +15,13 @@ pub fn spawn(command: &str) {
         .stderr(Stdio::null())
         .spawn()
     {
-        Ok(_child) => {}
+        Ok(mut child) => {
+            // Reap the child in a background thread so it doesn't linger as a
+            // zombie; streamwm stays responsive while the command runs.
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
         Err(e) => log::error!("spawn failed for `{command}`: {e}"),
     }
 }

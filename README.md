@@ -11,8 +11,9 @@ decorations.
 
 ## Features
 
-- **Tags 0–9** per output, with bitmask semantics (multiple tags visible at
-  once) and rename support.
+- **Tags 1–9** unified across all outputs: each tag belongs to one output, is
+  created on the output where it's first focused, and migrates to the first
+  output when its output is removed.
 - **Keybindings** via `river-xkb-bindings-v1`, with arbitrary command `spawn`
   actions.
 - **Lid-switch / clamshell** handling via systemd logind, switching kanshi

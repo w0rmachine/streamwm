@@ -5,14 +5,15 @@
 //! protocol on `$XDG_RUNTIME_DIR/streamwm-<display>.sock`:
 //!
 //!   get_status                      -> JSON status snapshot (one line)
-//!   { "cmd": "focus_tag", "tag": N }
+//!   { "cmd": "focus_tag", "tag": N, "output": "eDP-1" }
 //!   { "cmd": "send_to_tag", "tag": N }
 //!   { "cmd": "focus_output", "output": "eDP-1" }
 //!   { "cmd": "spawn", "command": "..." }
 //!   { "cmd": "quit" }
 //!
-//! The socket thread owns a `StatusSnapshot` (built by the event loop) and a
-//! `mpsc::Sender<Command>` back to the event loop.
+//! Each connection is request/response: the server writes one JSON line and
+//! closes. The socket thread owns a `StatusSnapshot` (built by the event loop)
+//! and a `mpsc::Sender<Command>` back to the event loop.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -35,8 +36,13 @@ pub struct StatusSnapshot {
 pub struct OutputSnap {
     pub name: String,
     pub focused: bool,
+    /// Bitmask of the currently active (shown) tag.
     pub active_mask: u32,
+    /// Bitmask of tags owned by this output (shown in the bar).
+    pub owned_mask: u32,
+    /// Bitmask of tags owned by this output that contain windows.
     pub occupied_mask: u32,
+    /// Bitmask of urgent tags.
     pub urgent_mask: u32,
     pub tags: Vec<TagSnap>,
     pub windows: Vec<WindowSnap>,
@@ -60,7 +66,7 @@ pub struct WindowSnap {
 /// A control command sent from the socket thread to the event loop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
-    FocusTag(u32),
+    FocusTag(u32, Option<String>),
     SendToTag(u32),
     FocusOutput(String),
     Spawn(String),
@@ -81,17 +87,35 @@ pub fn build_snapshot(state: &State, allow_spawn: bool) -> StatusSnapshot {
             snapshot.focused_output = Some(name.clone());
         }
 
+        // Owned/occupied/urgent masks are derived from the global tag table
+        // and the windows on those tags.
+        let mut owned_mask = 0u32;
+        let mut occupied_mask = 0u32;
+        let urgent_mask = 0u32;
+        for (t, tag) in state.tags.iter().enumerate() {
+            if tag.output == Some(i) {
+                owned_mask |= 1u32 << t;
+            }
+        }
+        for w in state.windows.iter() {
+            if state.tag_owner(w.tag) == Some(i) {
+                occupied_mask |= 1u32 << w.tag;
+            }
+        }
+
+        let active_mask = 1u32 << output.active_tag;
+
         let tags = (0..crate::state::NUM_TAGS)
             .map(|t| TagSnap {
                 id: t as u32,
-                label: output.tag_labels.get(t).and_then(|l| l.clone()),
+                label: state.tags.get(t).and_then(|tag| tag.label.clone()),
             })
             .collect();
 
         let windows = state
             .windows
             .iter()
-            .filter(|w| w.output == i)
+            .filter(|w| state.tag_owner(w.tag) == Some(i))
             .map(|w| WindowSnap {
                 id: w.id,
                 app_id: w.app_id.clone(),
@@ -103,9 +127,10 @@ pub fn build_snapshot(state: &State, allow_spawn: bool) -> StatusSnapshot {
         snapshot.outputs.push(OutputSnap {
             name,
             focused: Some(i) == focused_output_idx,
-            active_mask: output.active_mask,
-            occupied_mask: output.occupied_mask,
-            urgent_mask: output.urgent_mask,
+            active_mask,
+            owned_mask,
+            occupied_mask,
+            urgent_mask,
             tags,
             windows,
             focused_window: output.focused_window,
@@ -173,6 +198,9 @@ fn handle_client(
     let reader = BufReader::new(stream.try_clone().unwrap_or_else(|_| unreachable!()));
     let mut writer = stream;
 
+    // Request/response: read one line, write one response, then close so the
+    // client sees EOF (it reads until EOF). Keeping the connection open here
+    // would deadlock the client.
     for line in reader.lines() {
         let Ok(line) = line else { break };
         let line = line.trim();
@@ -185,13 +213,13 @@ fn handle_client(
             let snap = snapshot.lock().unwrap().clone();
             let json = serde_json::to_string(&snap).unwrap_or_else(|_| "{}".into());
             let _ = writeln!(writer, "{json}");
-            continue;
+            break;
         }
 
         // JSON control command.
         let Ok(cmd) = serde_json::from_str::<serde_json::Value>(line) else {
             let _ = writeln!(writer, "{{\"error\":\"bad json\"}}");
-            continue;
+            break;
         };
         let name = cmd.get("cmd").and_then(|v| v.as_str()).unwrap_or("");
         let result = parse_command_value(&cmd);
@@ -206,15 +234,20 @@ fn handle_client(
                 let _ = writeln!(writer, "{{\"error\":\"unknown command: {name}\"}}");
             }
         }
+        break;
     }
 }
 
 fn parse_command_value(cmd: &serde_json::Value) -> Option<Command> {
     match cmd.get("cmd").and_then(|v| v.as_str()).unwrap_or("") {
-        "focus_tag" => cmd
-            .get("tag")
-            .and_then(|v| v.as_u64())
-            .map(|t| Command::FocusTag(t as u32)),
+        "focus_tag" => {
+            let tag = cmd.get("tag").and_then(|v| v.as_u64())?;
+            let output = cmd
+                .get("output")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            Some(Command::FocusTag(tag as u32, output))
+        }
         "send_to_tag" => cmd
             .get("tag")
             .and_then(|v| v.as_u64())
@@ -235,9 +268,13 @@ fn parse_command_value(cmd: &serde_json::Value) -> Option<Command> {
 /// Apply a control command received over the socket to the running WM.
 pub fn apply_command(data: &mut crate::connection::AppData, cmd: Command) {
     match cmd {
-        Command::FocusTag(tag) => {
+        Command::FocusTag(tag, output) => {
             let mut s = data.state.borrow_mut();
-            if let Some(o) = s.active_output() {
+            let o = match output {
+                Some(name) => s.find_output_by_name(&name),
+                None => s.active_output(),
+            };
+            if let Some(o) = o {
                 s.focus_tag(o, tag as usize);
             }
         }
@@ -250,19 +287,7 @@ pub fn apply_command(data: &mut crate::connection::AppData, cmd: Command) {
         Command::FocusOutput(name) => {
             let mut s = data.state.borrow_mut();
             if let Some(idx) = s.find_output_by_name(&name) {
-                // Focus the output (seat focus), and bring its active tag's
-                // focused window into focus.
                 s.focused_output = Some(idx);
-                let fid = s.outputs[idx].focused_window;
-                if let Some(fid) = fid {
-                    if let Some(w) = s.find_window(fid) {
-                        let tag = w.tag;
-                        // Ensure the tag is active without collapsing a multi-tag view.
-                        if (s.outputs[idx].active_mask >> tag) & 1 == 0 {
-                            s.outputs[idx].active_mask = 1u32 << tag;
-                        }
-                    }
-                }
             }
         }
         Command::Spawn(cmd_str) => {
@@ -302,7 +327,11 @@ mod tests {
     fn parses_control_commands() {
         assert_eq!(
             parse_command_value(&json!({ "cmd": "focus_tag", "tag": 4 })),
-            Some(Command::FocusTag(4))
+            Some(Command::FocusTag(4, None))
+        );
+        assert_eq!(
+            parse_command_value(&json!({ "cmd": "focus_tag", "tag": 4, "output": "eDP-1" })),
+            Some(Command::FocusTag(4, Some("eDP-1".into())))
         );
         assert_eq!(
             parse_command_value(&json!({ "cmd": "send_to_tag", "tag": 8 })),

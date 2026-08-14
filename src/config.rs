@@ -123,9 +123,9 @@ impl Config {
         })
     }
 
-    /// Number of tags (fixed 0..=9).
+    /// Number of tags (fixed 1..=9).
     pub fn num_tags(&self) -> u32 {
-        10
+        9
     }
 
     /// Parse a hex color like "4c4c4c" into (r,g,b) 0..255.
@@ -168,7 +168,7 @@ mod tests {
         let c: Config = toml::from_str("modifier = \"super\"\ngap = 4\n").unwrap();
         assert_eq!(c.modifier, "super");
         assert_eq!(c.gap, 4);
-        assert_eq!(c.num_tags(), 10);
+        assert_eq!(c.num_tags(), 9);
         assert!(!c.allow_spawn);
     }
 

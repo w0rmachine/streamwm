@@ -95,10 +95,11 @@ pub fn default_bindings(config: &crate::config::Config) -> Vec<(String, String, 
         ("l".into(), "".into(), "focus_next_output".into()),
         ("space".into(), "".into(), "cycle_layout".into()),
     ];
-    for t in 0..=9u32 {
+    for t in 1..=9u32 {
         let key = char::from_digit(t, 10).unwrap().to_string();
-        binds.push((key.clone(), "".into(), format!("focus_tag:{t}")));
-        binds.push((key, modified_shift.clone(), format!("send_to_tag:{t}")));
+        let tag = t - 1;
+        binds.push((key.clone(), "".into(), format!("focus_tag:{tag}")));
+        binds.push((key, modified_shift.clone(), format!("send_to_tag:{tag}")));
     }
     for b in &config.bindings {
         let action = match &b.arg {
@@ -186,11 +187,11 @@ fn run_action(data: &mut AppData, action: &str) {
         "focus_next" | "focus_prev" => {
             let mut s = data.state.borrow_mut();
             if let Some(o) = s.active_output() {
-                let active = s.outputs[o].active_mask;
+                let active = s.outputs[o].active_tag;
                 let ids: Vec<u32> = s
                     .windows
                     .iter()
-                    .filter(|w| w.output == o && (active >> w.tag) & 1 == 1 && !w.floating)
+                    .filter(|w| s.tag_owner(w.tag) == Some(o) && w.tag == active && !w.floating)
                     .map(|w| w.id)
                     .collect();
                 if !ids.is_empty() {
@@ -353,12 +354,12 @@ mod tests {
         assert!(bindings.iter().any(|(key, modifiers, action)| key == "E"
             && modifiers == "super"
             && action == "quit"));
-        assert!(bindings.iter().any(|(key, modifiers, action)| key == "0"
+        assert!(bindings.iter().any(|(key, modifiers, action)| key == "1"
             && modifiers.is_empty()
             && action == "focus_tag:0"));
         assert!(bindings.iter().any(|(key, modifiers, action)| key == "9"
             && modifiers == "super+shift"
-            && action == "send_to_tag:9"));
+            && action == "send_to_tag:8"));
     }
 
     #[test]

@@ -47,7 +47,12 @@ pub fn on_manage_start(data: &mut AppData, wm: &RiverWindowManagerV1) {
             .iter()
             .map(|output| output.proxy.clone())
             .collect();
-        for w in state.windows.iter_mut() {
+        let window_outputs: Vec<usize> = state
+            .windows
+            .iter()
+            .map(|w| state.tag_owner(w.tag).unwrap_or(0))
+            .collect();
+        for (i, w) in state.windows.iter_mut().enumerate() {
             if w.ssd_applied != Some(data.config.use_ssd) {
                 if data.config.use_ssd {
                     w.proxy.use_ssd();
@@ -59,7 +64,7 @@ pub fn on_manage_start(data: &mut AppData, wm: &RiverWindowManagerV1) {
 
             if w.fullscreen != w.fullscreen_applied {
                 if w.fullscreen {
-                    if let Some(output) = outputs.get(w.output) {
+                    if let Some(output) = outputs.get(window_outputs[i]) {
                         w.proxy.fullscreen(output);
                         w.fullscreen_applied = true;
                     }

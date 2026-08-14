@@ -29,11 +29,11 @@ pub fn compute_all(state: &State, config: &Config) -> Vec<(u32, Geometry)> {
 
 /// Visible (non-floating) windows for an output, in master+stack order.
 fn visible_windows(state: &State, output_idx: usize) -> Vec<u32> {
-    let active = state.outputs[output_idx].active_mask;
+    let active = state.outputs[output_idx].active_tag;
     state
         .windows
         .iter()
-        .filter(|w| w.output == output_idx && (active >> w.tag) & 1 == 1 && !w.floating)
+        .filter(|w| state.tag_owner(w.tag) == Some(output_idx) && w.tag == active && !w.floating)
         .map(|w| w.id)
         .collect()
 }
@@ -173,12 +173,7 @@ pub fn render_all_run(data: &mut AppData) {
                     .iter()
                     .find(|(wid, _)| *wid == w.id)
                     .map(|(_, g)| *g);
-                let floating_visible = w.floating
-                    && state
-                        .outputs
-                        .get(w.output)
-                        .map(|o| (o.active_mask >> w.tag) & 1 == 1)
-                        .unwrap_or(false);
+                let floating_visible = w.floating && state.window_is_visible(w);
                 (w.id, geom.is_some() || floating_visible, geom)
             })
             .collect()
