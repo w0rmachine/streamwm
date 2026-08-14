@@ -120,7 +120,7 @@ pub fn build_snapshot(state: &State, allow_spawn: bool) -> StatusSnapshot {
 ///
 /// Returns a `Receiver<Command>` the event loop must poll, plus the
 /// `Arc<Mutex<StatusSnapshot>>` the loop updates and the socket writes.
-pub fn start() -> (mpsc::Receiver<Command>, Arc<Mutex<StatusSnapshot>>) {
+pub fn start(wake: UnixStream) -> (mpsc::Receiver<Command>, Arc<Mutex<StatusSnapshot>>) {
     let socket_path = socket_path();
     let snapshot = Arc::new(Mutex::new(StatusSnapshot::default()));
     let (tx, rx) = mpsc::channel::<Command>();
@@ -144,7 +144,14 @@ pub fn start() -> (mpsc::Receiver<Command>, Arc<Mutex<StatusSnapshot>>) {
             let Ok(stream) = stream else { continue };
             let snap = snapshot_for_thread.clone();
             let tx = tx_for_thread.clone();
-            thread::spawn(move || handle_client(stream, snap, tx));
+            let wake = match wake.try_clone() {
+                Ok(wake) => wake,
+                Err(e) => {
+                    log::warn!("failed to clone status wake socket: {e}");
+                    continue;
+                }
+            };
+            thread::spawn(move || handle_client(stream, snap, tx, wake));
         }
     });
 
@@ -161,6 +168,7 @@ fn handle_client(
     stream: UnixStream,
     snapshot: Arc<Mutex<StatusSnapshot>>,
     tx: mpsc::Sender<Command>,
+    mut wake: UnixStream,
 ) {
     let reader = BufReader::new(stream.try_clone().unwrap_or_else(|_| unreachable!()));
     let mut writer = stream;
@@ -191,6 +199,7 @@ fn handle_client(
         match result {
             Some(cmd) => {
                 let _ = tx.send(cmd);
+                let _ = wake.write_all(&[1]);
                 let _ = writeln!(writer, "{{\"status\":\"ok\"}}");
             }
             None => {

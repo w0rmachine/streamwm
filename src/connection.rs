@@ -1,9 +1,13 @@
 //! Wayland connection and the river window-management event loop.
 
 use std::cell::RefCell;
+use std::io::Read;
+use std::os::fd::AsFd;
+use std::os::unix::net::UnixStream;
 use std::rc::Rc;
 
 use log::info;
+use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 use wayland_client::{
     delegate_noop,
     globals::registry_queue_init,
@@ -84,7 +88,12 @@ pub fn run(config: &Config) -> Result<(), String> {
     bind_globals(&globals, &qh, &mut data)?;
 
     // Start the status/control socket server.
-    let (command_rx, snapshot) = crate::status::start();
+    let (wake_reader, wake_writer) =
+        UnixStream::pair().map_err(|e| format!("status wake socket: {e}"))?;
+    wake_reader
+        .set_nonblocking(true)
+        .map_err(|e| format!("status wake socket nonblocking: {e}"))?;
+    let (command_rx, snapshot) = crate::status::start(wake_writer);
     data.snapshot = Some(snapshot);
 
     info!("streamwm connected; entering event loop");
@@ -95,23 +104,72 @@ pub fn run(config: &Config) -> Result<(), String> {
             .dispatch_pending(&mut data)
             .map_err(|e| format!("dispatch: {e}"))?;
 
-        // Service any control commands from the socket thread.
-        if let Ok(cmd) = command_rx.try_recv() {
-            crate::status::apply_command(&mut data, cmd);
-        }
+        service_control_commands(&command_rx, &mut data);
 
         if data.quit {
             break;
         }
 
-        // Block for the next wayland event.
-        event_queue
-            .blocking_dispatch(&mut data)
-            .map_err(|e| format!("dispatch: {e}"))?;
+        conn.flush().map_err(|e| format!("flush: {e}"))?;
+
+        let Some(read_guard) = event_queue.prepare_read() else {
+            continue;
+        };
+
+        let wayland_ready;
+        let wake_ready;
+        {
+            let mut fds = [
+                PollFd::new(read_guard.connection_fd(), PollFlags::POLLIN),
+                PollFd::new(wake_reader.as_fd(), PollFlags::POLLIN),
+            ];
+            poll(&mut fds, PollTimeout::NONE).map_err(|e| format!("poll: {e}"))?;
+            wayland_ready = fds[0]
+                .revents()
+                .unwrap_or_else(PollFlags::empty)
+                .intersects(PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR);
+            wake_ready = fds[1]
+                .revents()
+                .unwrap_or_else(PollFlags::empty)
+                .contains(PollFlags::POLLIN);
+        }
+
+        if wayland_ready {
+            read_guard.read().map_err(|e| format!("read: {e}"))?;
+        }
+
+        if wake_ready {
+            drain_wake_socket(&wake_reader);
+            service_control_commands(&command_rx, &mut data);
+        }
     }
 
     info!("streamwm exiting");
     Ok(())
+}
+
+fn service_control_commands(
+    command_rx: &std::sync::mpsc::Receiver<crate::status::Command>,
+    data: &mut AppData,
+) {
+    while let Ok(cmd) = command_rx.try_recv() {
+        crate::status::apply_command(data, cmd);
+    }
+}
+
+fn drain_wake_socket(mut wake_reader: &UnixStream) {
+    let mut buf = [0u8; 64];
+    loop {
+        match wake_reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(e) => {
+                log::warn!("status wake read failed: {e}");
+                break;
+            }
+        }
+    }
 }
 
 fn bind_globals(
@@ -265,5 +323,4 @@ delegate_noop!(AppData: ignore RiverXkbBindingsV1);
 delegate_noop!(AppData: ignore WlSeat);
 delegate_noop!(AppData: ignore WlSurface);
 delegate_noop!(AppData: ignore crate::protocols::layer_shell::river_layer_shell_v1::RiverLayerShellV1);
-delegate_noop!(AppData: ignore crate::protocols::layer_shell::river_layer_shell_output_v1::RiverLayerShellOutputV1);
 delegate_noop!(AppData: ignore crate::protocols::layer_shell::river_layer_shell_seat_v1::RiverLayerShellSeatV1);

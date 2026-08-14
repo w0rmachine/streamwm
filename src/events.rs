@@ -7,6 +7,9 @@ use wayland_client::{
 };
 
 use crate::connection::AppData;
+use crate::protocols::layer_shell::river_layer_shell_output_v1::{
+    Event as LayerOutputEvent, RiverLayerShellOutputV1,
+};
 use crate::protocols::wm::river_output_v1::{Event as OutputEvent, RiverOutputV1};
 use crate::protocols::wm::river_seat_v1::{Event as SeatEvent, RiverSeatV1};
 use crate::protocols::wm::river_window_v1::{Event as WindowEvent, RiverWindowV1};
@@ -68,10 +71,18 @@ impl Dispatch<RiverOutputV1, ()> for AppData {
             OutputEvent::Position { x, y } => {
                 state.outputs[idx].x = x;
                 state.outputs[idx].y = y;
+                if state.outputs[idx].usable_width == 0 && state.outputs[idx].usable_height == 0 {
+                    state.outputs[idx].usable_x = x;
+                    state.outputs[idx].usable_y = y;
+                }
             }
             OutputEvent::Dimensions { width, height } => {
                 state.outputs[idx].width = width as u32;
                 state.outputs[idx].height = height as u32;
+                if state.outputs[idx].usable_width == 0 && state.outputs[idx].usable_height == 0 {
+                    state.outputs[idx].usable_width = width as u32;
+                    state.outputs[idx].usable_height = height as u32;
+                }
             }
             OutputEvent::WlOutput { name } => {
                 state.outputs[idx].wl_global = Some(name);
@@ -102,6 +113,38 @@ impl Dispatch<RiverOutputV1, ()> for AppData {
                 }
             }
         }
+    }
+}
+
+impl Dispatch<RiverLayerShellOutputV1, ()> for AppData {
+    fn event(
+        data: &mut Self,
+        layer_output: &RiverLayerShellOutputV1,
+        event: LayerOutputEvent,
+        _ud: &(),
+        _conn: &WlConnection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        let oid = layer_output.id();
+        let mut state = data.state.borrow_mut();
+        let Some(output) = state
+            .outputs
+            .iter_mut()
+            .find(|output| output.layer.as_ref().is_some_and(|layer| layer.id() == oid))
+        else {
+            return;
+        };
+
+        let LayerOutputEvent::NonExclusiveArea {
+            x,
+            y,
+            width,
+            height,
+        } = event;
+        output.usable_x = x;
+        output.usable_y = y;
+        output.usable_width = width.max(0) as u32;
+        output.usable_height = height.max(0) as u32;
     }
 }
 
