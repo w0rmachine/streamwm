@@ -194,6 +194,26 @@ impl Dispatch<RiverSeatV1, ()> for AppData {
                     }
                 }
             }
+            SeatEvent::PointerPosition { x, y } => {
+                // Track the raw pointer and switch the focused output to the one
+                // containing the pointer. This is what makes focus-follows-mouse
+                // work over *empty* desktop: river only sends pointer_enter when
+                // the pointer enters a window, so without this, an output with no
+                // windows can never gain focus (and newly spawned windows are
+                // stuck on the first output).
+                if data.config.focus_follows_mouse {
+                    state.focused_output = state
+                        .outputs
+                        .iter()
+                        .position(|o| {
+                            x >= o.x
+                                && x < o.x + o.width as i32
+                                && y >= o.y
+                                && y < o.y + o.height as i32
+                        })
+                        .or(state.focused_output);
+                }
+            }
             SeatEvent::Removed => {
                 state.seats.retain(|s| s.proxy.id() != sid);
             }
