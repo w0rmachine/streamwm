@@ -172,6 +172,17 @@ pub fn dispatch_action(data: &mut AppData, triggered: &RiverXkbBindingV1) {
     run_action(data, &action);
 }
 
+/// Whether an action is a resize-mode binding that should only be active while
+/// resize mode is entered. These use the `none` modifier, so if they were left
+/// enabled permanently they would swallow the plain keys (h/l/arrows/Escape)
+/// across the whole session.
+pub fn is_resize_binding(action: &str) -> bool {
+    matches!(
+        action,
+        "resize_step_left" | "resize_step_right" | "exit_resize_mode"
+    )
+}
+
 fn run_action(data: &mut AppData, action: &str) {
     log::debug!("action: {action}");
 
@@ -300,10 +311,16 @@ fn run_action(data: &mut AppData, action: &str) {
         }
         "enter_resize_mode" => {
             data.state.borrow_mut().resize_mode = true;
+            // Re-enable the resize-mode-only keybindings (h/l/arrows/Escape)
+            // via a manage sequence.
+            needs_manage = true;
             log::debug!("resize mode on");
         }
         "exit_resize_mode" => {
             data.state.borrow_mut().resize_mode = false;
+            // Disable the resize-mode-only keybindings so the plain keys are
+            // delivered to focused surfaces again.
+            needs_manage = true;
             log::debug!("resize mode off");
         }
         "resize_step_left" | "resize_step_right" => {
@@ -595,5 +612,15 @@ mod tests {
         assert!(bindings.iter().any(|(key, modifiers, action)| key == "Escape"
             && modifiers == "none"
             && action == "exit_resize_mode"));
+    }
+
+    #[test]
+    fn resize_bindings_are_flagged_resize_only() {
+        assert!(is_resize_binding("resize_step_left"));
+        assert!(is_resize_binding("resize_step_right"));
+        assert!(is_resize_binding("exit_resize_mode"));
+        assert!(!is_resize_binding("enter_resize_mode"));
+        assert!(!is_resize_binding("focus_next"));
+        assert!(!is_resize_binding("spawn"));
     }
 }

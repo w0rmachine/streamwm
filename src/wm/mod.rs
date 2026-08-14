@@ -139,9 +139,21 @@ pub fn on_manage_start(data: &mut AppData, wm: &RiverWindowManagerV1) {
         }
     }
 
-    // Enable any keybindings that were created before this manage sequence.
-    for (binding, _action) in &data.bindings {
-        binding.enable();
+    // Enable keybindings that were created before this manage sequence.
+    // Resize-mode bindings (h/l/arrows/Escape, bound with the `none` modifier)
+    // are only enabled while resize mode is active; otherwise they would
+    // swallow those plain keys everywhere.
+    let resize_mode = data.state.borrow().resize_mode;
+    for (binding, action) in &data.bindings {
+        if crate::bindings::is_resize_binding(action) {
+            if resize_mode {
+                binding.enable();
+            } else {
+                binding.disable();
+            }
+        } else {
+            binding.enable();
+        }
     }
     for (binding, _action) in &data.pointer_bindings {
         binding.enable();
