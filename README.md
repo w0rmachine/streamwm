@@ -64,7 +64,7 @@ calculators, the small Google Meet in-call window, etc.), list their app ids in
 ```toml
 floating_app_ids = [
   "polkit-gnome-authentication-agent-1",
-  "gnome-calculator",
+  "org.gnome.Calculator",
   "google-meet",
 ]
 ```
