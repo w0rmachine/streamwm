@@ -46,6 +46,8 @@ nix build .#default
 
 ## Configuration
 
-streamwm reads a TOML config (default `/etc/streamwm/config.toml`). See
-`src/config.rs` for the full schema. The `dotfiles` repo generates this config
-and the river `init` script from Nix.
+streamwm reads a TOML config. The path is taken from the first CLI argument,
+defaulting to `/etc/streamwm/config.toml` if none is given. The `dotfiles` repo
+generates this config (at `~/.config/streamwm/config.toml`) and the river
+`init` script from Nix, and passes the path explicitly. See `src/config.rs`
+for the full schema.
