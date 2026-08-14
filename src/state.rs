@@ -301,24 +301,35 @@ impl State {
         match owner {
             None => {
                 self.tags[tag].output = Some(output_idx);
-                if let Some(o) = self.outputs.get_mut(output_idx) {
-                    o.active_tag = tag;
-                }
-                self.refocus_output(output_idx);
+                self.activate_tag(output_idx, tag);
             }
             Some(owner) if owner == output_idx => {
-                if let Some(o) = self.outputs.get_mut(output_idx) {
-                    o.active_tag = tag;
-                }
-                self.refocus_output(output_idx);
+                self.activate_tag(output_idx, tag);
             }
             Some(owner) => {
                 self.focused_output = Some(owner);
-                if let Some(o) = self.outputs.get_mut(owner) {
-                    o.active_tag = tag;
-                }
-                self.refocus_output(owner);
+                self.activate_tag(owner, tag);
             }
+        }
+    }
+
+    /// Make `tag` the active tag of `output_idx`, deleting the previously
+    /// active tag if it is now empty.
+    fn activate_tag(&mut self, output_idx: usize, tag: usize) {
+        let old = self.outputs[output_idx].active_tag;
+        self.outputs[output_idx].active_tag = tag;
+        if old != tag {
+            self.delete_tag_if_empty(output_idx, old);
+        }
+        self.refocus_output(output_idx);
+    }
+
+    /// Unassign `tag` from `output_idx` if no window is on it anymore.
+    fn delete_tag_if_empty(&mut self, output_idx: usize, tag: usize) {
+        if self.tags.get(tag).and_then(|t| t.output) == Some(output_idx)
+            && !self.windows.iter().any(|w| w.tag == tag)
+        {
+            self.tags[tag].output = None;
         }
     }
 
