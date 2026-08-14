@@ -34,6 +34,9 @@ decorations.
 - `src/status.rs` — the JSON socket server.
 - `src/lid.rs` — logind lid listener.
 
+Detailed river/Wayland sequence notes live in
+[`docs/wayland-compatibility.md`](docs/wayland-compatibility.md).
+
 ## Build
 
 ```
