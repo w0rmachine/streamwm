@@ -53,6 +53,39 @@ pub struct AppData {
     pub pending_close: Vec<u32>,
     /// Status snapshot, updated after render, read by the socket thread.
     pub snapshot: Option<std::sync::Arc<std::sync::Mutex<crate::status::StatusSnapshot>>>,
+    /// Active pointer bindings: (binding proxy, action "move"/"resize").
+    pub pointer_bindings: Vec<(
+        crate::protocols::wm::river_pointer_binding_v1::RiverPointerBindingV1,
+        String,
+    )>,
+    /// Active interactive pointer operation (floating move/resize), if any.
+    pub pointer_op: Option<PointerOp>,
+    /// A pointer operation queued to start at the next manage sequence.
+    pub pending_op: Option<PointerOp>,
+    /// Whether an op_end is queued for the next manage sequence.
+    pub op_end_requested: bool,
+}
+
+/// An in-progress interactive pointer operation for a floating window.
+pub struct PointerOp {
+    pub window: u32,
+    pub kind: OpKind,
+    /// Starting cursor position (logical px) at op start.
+    pub start_x: i32,
+    pub start_y: i32,
+    /// Starting floating geometry.
+    pub start_float_x: i32,
+    pub start_float_y: i32,
+    pub start_w: u32,
+    pub start_h: u32,
+    /// The seat driving this op, to send op_end on release.
+    pub seat: crate::protocols::wm::river_seat_v1::RiverSeatV1,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum OpKind {
+    Move,
+    Resize,
 }
 
 impl AppData {
@@ -70,6 +103,10 @@ impl AppData {
             layer_default_set: false,
             pending_close: Vec::new(),
             snapshot: None,
+            pointer_bindings: Vec::new(),
+            pointer_op: None,
+            pending_op: None,
+            op_end_requested: false,
         }
     }
 }
@@ -77,6 +114,7 @@ impl AppData {
 pub fn run(config: &Config) -> Result<(), String> {
     let conn = wayland_client::Connection::connect_to_env().map_err(|e| format!("connect: {e}"))?;
     let state = Rc::new(RefCell::new(State::new()));
+    state.borrow_mut().master_fraction = config.master_fraction.clamp(0.1, 0.9);
     let mut data = AppData::new(state, Rc::new(config.clone()));
 
     let (globals, mut event_queue) =
@@ -258,6 +296,9 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppData {
                 if let Some(xkb) = data.xkb.clone() {
                     crate::bindings::bind_for_seat(data, &xkb, &seat_proxy);
                 }
+                // Bind pointer bindings (Mod+drag move/resize) for floating
+                // windows.
+                crate::bindings::bind_pointer_for_seat(data, &seat_proxy);
                 // Create layer-shell seat state for this seat.
                 let layer = data.layer_shell.clone();
                 let qh = data.qh.clone();

@@ -3,7 +3,7 @@
 
 use wayland_client::{Connection as WlConnection, Dispatch, Proxy, QueueHandle};
 
-use crate::connection::AppData;
+use crate::connection::{AppData, OpKind, PointerOp};
 use crate::protocols::wm::river_seat_v1::{Modifiers, RiverSeatV1};
 use crate::protocols::xkb_bindings::river_xkb_binding_v1::{
     Event as XkbBindingEvent, RiverXkbBindingV1,
@@ -54,6 +54,9 @@ fn parse_keysym(name: &str) -> Option<u32> {
 /// Parse a comma-separated modifier list into river's Modifiers bitflags.
 fn parse_modifiers(s: &str, config_modifier: &str) -> Modifiers {
     let mut m = Modifiers::empty();
+    if s.trim().eq_ignore_ascii_case("none") {
+        return m;
+    }
     for part in s.split([',', '+']) {
         match part.trim().to_ascii_lowercase().as_str() {
             "" => {}
@@ -94,6 +97,12 @@ pub fn default_bindings(config: &crate::config::Config) -> Vec<(String, String, 
         ("h".into(), "".into(), "focus_prev_output".into()),
         ("l".into(), "".into(), "focus_next_output".into()),
         ("space".into(), "".into(), "cycle_layout".into()),
+        ("r".into(), "".into(), "enter_resize_mode".into()),
+        ("Left".into(), "none".into(), "resize_step_left".into()),
+        ("Right".into(), "none".into(), "resize_step_right".into()),
+        ("h".into(), "none".into(), "resize_step_left".into()),
+        ("l".into(), "none".into(), "resize_step_right".into()),
+        ("Escape".into(), "none".into(), "exit_resize_mode".into()),
     ];
     for t in 1..=9u32 {
         let key = char::from_digit(t, 10).unwrap().to_string();
@@ -128,6 +137,22 @@ pub fn bind_for_seat(data: &mut AppData, xkb: &RiverXkbBindingsV1, seat: &RiverS
         let binding = xkb.get_xkb_binding(seat, ks, m, &qh, ());
         data.bindings.push((binding, action));
     }
+}
+
+/// Linux input event codes for the two mouse buttons we bind.
+const BTN_LEFT: u32 = 0x110; // 272
+const BTN_RIGHT: u32 = 0x111; // 273
+
+/// Bind Mod+left-drag (move) and Mod+right-drag (resize) for floating windows.
+pub fn bind_pointer_for_seat(data: &mut AppData, seat: &RiverSeatV1) {
+    let qh = data.qh.clone().expect("qh not set");
+    let modifier = data.config.modifier.clone();
+    let m = parse_modifiers("", &modifier);
+
+    let b_move = seat.get_pointer_binding(BTN_LEFT, m, &qh, ());
+    let b_resize = seat.get_pointer_binding(BTN_RIGHT, m, &qh, ());
+    data.pointer_bindings.push((b_move, "move".into()));
+    data.pointer_bindings.push((b_resize, "resize".into()));
 }
 
 /// Dispatch a triggered binding to its action.
@@ -273,6 +298,24 @@ fn run_action(data: &mut AppData, action: &str) {
             // No-op for now; layout is a single tiling layout in v1.
             log::debug!("cycle_layout (single layout; no-op)");
         }
+        "enter_resize_mode" => {
+            data.state.borrow_mut().resize_mode = true;
+            log::debug!("resize mode on");
+        }
+        "exit_resize_mode" => {
+            data.state.borrow_mut().resize_mode = false;
+            log::debug!("resize mode off");
+        }
+        "resize_step_left" | "resize_step_right" => {
+            let mut s = data.state.borrow_mut();
+            if !s.resize_mode {
+                return;
+            }
+            let step = data.config.resize_step;
+            let delta = if name == "resize_step_right" { step } else { -step };
+            s.master_fraction = (s.master_fraction + delta).clamp(0.1, 0.9);
+            needs_manage = true;
+        }
         "quit" => {
             data.quit = true;
         }
@@ -299,6 +342,154 @@ impl Dispatch<RiverXkbBindingV1, ()> for AppData {
     ) {
         if let XkbBindingEvent::Pressed = event {
             dispatch_action(data, binding);
+        }
+    }
+}
+
+impl Dispatch<
+    crate::protocols::wm::river_pointer_binding_v1::RiverPointerBindingV1,
+    (),
+> for AppData
+{
+    fn event(
+        data: &mut Self,
+        binding: &crate::protocols::wm::river_pointer_binding_v1::RiverPointerBindingV1,
+        event: crate::protocols::wm::river_pointer_binding_v1::Event,
+        _ud: &(),
+        _conn: &WlConnection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        use crate::protocols::wm::river_pointer_binding_v1::Event as PEvent;
+        match event {
+            PEvent::Pressed => start_pointer_op(data, binding),
+            PEvent::Released => end_pointer_op(data),
+        }
+    }
+}
+
+/// Start a move/resize operation for the floating window under the pointer.
+fn start_pointer_op(
+    data: &mut AppData,
+    binding: &crate::protocols::wm::river_pointer_binding_v1::RiverPointerBindingV1,
+) {
+    let action = data
+        .pointer_bindings
+        .iter()
+        .find(|(b, _)| b.id() == binding.id())
+        .map(|(_, a)| a.clone());
+    let Some(action) = action else {
+        return;
+    };
+
+    // Find the floating window under the pointer and its seat.
+    let (wid, seat, px, py) = {
+        let state = data.state.borrow();
+        let mut found = None;
+        for seat in state.seats.iter() {
+            if let Some(wid) = seat.pointer_window {
+                if state.find_window(wid).map(|w| w.floating).unwrap_or(false) {
+                    found = Some((wid, seat.proxy.clone(), seat.pointer_x, seat.pointer_y));
+                    break;
+                }
+            }
+        }
+        let Some(found) = found else {
+            return;
+        };
+        found
+    };
+
+    let (fx, fy, fw, fh) = {
+        let state = data.state.borrow();
+        match state.find_window(wid) {
+            Some(w) => (w.float_x, w.float_y, w.float_w, w.float_h),
+            None => return,
+        }
+    };
+
+    let kind = if action == "move" {
+        OpKind::Move
+    } else {
+        OpKind::Resize
+    };
+
+    // Defer op_start_pointer to the manage sequence (it modifies window
+    // management state).
+    data.pending_op = Some(PointerOp {
+        window: wid,
+        kind,
+        start_x: px,
+        start_y: py,
+        start_float_x: fx,
+        start_float_y: fy,
+        start_w: fw,
+        start_h: fh,
+        seat,
+    });
+    if let Some(wm) = &data.wm {
+        wm.manage_dirty();
+    }
+}
+
+/// Apply a cumulative pointer delta to the active operation.
+pub fn apply_pointer_delta(data: &mut AppData, dx: i32, dy: i32) {
+    let Some(op) = data.pointer_op.as_ref() else {
+        return;
+    };
+    let (window, kind, sx, sy, sfx, sfy, sw, sh) = (
+        op.window,
+        op.kind,
+        op.start_x,
+        op.start_y,
+        op.start_float_x,
+        op.start_float_y,
+        op.start_w,
+        op.start_h,
+    );
+
+    let mut state = data.state.borrow_mut();
+    let Some(w) = state.find_window_mut(window) else {
+        return;
+    };
+    match kind {
+        OpKind::Move => {
+            w.float_x = sfx + (dx - sx);
+            w.float_y = sfy + (dy - sy);
+        }
+        OpKind::Resize => {
+            let nw = (sw as i32 + (dx - sx)).max(50);
+            let nh = (sh as i32 + (dy - sy)).max(50);
+            w.float_w = nw as u32;
+            w.float_h = nh as u32;
+        }
+    }
+}
+
+/// End the active pointer operation and send op_end to the driving seat.
+pub fn end_pointer_op(data: &mut AppData) {
+    // Defer op_end to the manage sequence (it modifies window management
+    // state).
+    if data.pointer_op.is_some() || data.pending_op.is_some() {
+        data.op_end_requested = true;
+        if let Some(wm) = &data.wm {
+            wm.manage_dirty();
+        }
+    }
+}
+
+/// Process queued pointer op start/end requests, called inside a manage
+/// sequence. Must be invoked between manage_start and manage_finish.
+pub fn process_pointer_ops(data: &mut AppData) {
+    // Start a queued op.
+    if let Some(op) = data.pending_op.take() {
+        op.seat.op_start_pointer();
+        data.pointer_op = Some(op);
+    }
+    // End the active op if requested.
+    if data.op_end_requested {
+        data.op_end_requested = false;
+        if let Some(op) = data.pointer_op.take() {
+            op.seat.op_end();
         }
     }
 }
@@ -381,5 +572,28 @@ mod tests {
         assert!(parse_modifiers("", "super").contains(Modifiers::Mod4));
         assert!(parse_modifiers("", "alt").contains(Modifiers::Mod1));
         assert!(parse_modifiers("", "ctrl").contains(Modifiers::Ctrl));
+    }
+
+    #[test]
+    fn modifier_parser_accepts_none() {
+        assert!(parse_modifiers("none", "super").is_empty());
+    }
+
+    #[test]
+    fn default_bindings_include_resize_mode() {
+        let bindings = default_bindings(&Config::default());
+
+        assert!(bindings.iter().any(|(key, modifiers, action)| key == "r"
+            && modifiers.is_empty()
+            && action == "enter_resize_mode"));
+        assert!(bindings.iter().any(|(key, modifiers, action)| key == "Left"
+            && modifiers == "none"
+            && action == "resize_step_left"));
+        assert!(bindings.iter().any(|(key, modifiers, action)| key == "Right"
+            && modifiers == "none"
+            && action == "resize_step_right"));
+        assert!(bindings.iter().any(|(key, modifiers, action)| key == "Escape"
+            && modifiers == "none"
+            && action == "exit_resize_mode"));
     }
 }

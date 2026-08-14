@@ -13,9 +13,6 @@ pub struct Geometry {
     pub height: u32,
 }
 
-/// Fraction of the width given to the master window (main+stack layout).
-const MASTER_FRACTION: f64 = 0.55;
-
 /// Compute geometry for every visible window across all outputs.
 /// Returns (window_id, geometry) — floating windows are excluded (they are
 /// positioned independently).
@@ -83,6 +80,7 @@ fn compute_output(state: &State, output_idx: usize, config: &Config) -> Vec<(u32
         },
         base_y + base_h as i32,
         gap,
+        state.master_fraction,
     )
 }
 
@@ -91,6 +89,7 @@ fn compute_tiling(
     area: Geometry,
     output_bottom: i32,
     gap: i32,
+    master_fraction: f64,
 ) -> Vec<(u32, Geometry)> {
     let n = ids.len();
     let mut result = Vec::with_capacity(n);
@@ -104,7 +103,7 @@ fn compute_tiling(
         return result;
     }
 
-    let master_w = ((area.width as f64 * MASTER_FRACTION) as i32).max(0) as u32;
+    let master_w = ((area.width as f64 * master_fraction) as i32).max(0) as u32;
     result.push((
         ids[0],
         Geometry {
@@ -240,7 +239,8 @@ mod tests {
                 height: 100
             },
             100,
-            4
+            4,
+            0.55,
         )
         .is_empty());
     }
@@ -254,7 +254,7 @@ mod tests {
             height: 600,
         };
 
-        assert_eq!(compute_tiling(&[7], area, 620, 8), vec![(7, area)]);
+        assert_eq!(compute_tiling(&[7], area, 620, 8, 0.55), vec![(7, area)]);
     }
 
     #[test]
@@ -267,7 +267,7 @@ mod tests {
         };
 
         assert_eq!(
-            compute_tiling(&[1, 2, 3], area, 600, 10),
+            compute_tiling(&[1, 2, 3], area, 600, 10, 0.55),
             vec![
                 (
                     1,

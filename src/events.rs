@@ -34,6 +34,14 @@ impl Dispatch<RiverWindowV1, ()> for AppData {
             }
             WindowEvent::AppId { app_id } => {
                 if let Some(w) = state.find_window_mut(id) {
+                    // Auto-float windows whose app id is in the configured
+                    // "never tile" list (password forms, calculator, Google
+                    // Meet call window, ...).
+                    if let Some(app_id) = app_id.as_deref() {
+                        if data.config.is_floating_app(app_id) {
+                            w.floating = true;
+                        }
+                    }
                     w.app_id = app_id;
                 }
             }
@@ -142,9 +150,30 @@ impl Dispatch<RiverSeatV1, ()> for AppData {
         _qh: &QueueHandle<Self>,
     ) {
         let sid = seat.id();
+
+        // Interactive pointer operation events (floating move/resize) need to
+        // mutate the op state and window geometry, so handle them before taking
+        // the general `state` borrow.
+        match &event {
+            SeatEvent::OpDelta { dx, dy } => {
+                crate::bindings::apply_pointer_delta(data, *dx, *dy);
+                return;
+            }
+            SeatEvent::OpRelease => {
+                crate::bindings::end_pointer_op(data);
+                return;
+            }
+            _ => {}
+        }
+
         let mut state = data.state.borrow_mut();
         match event {
             SeatEvent::PointerEnter { window } => {
+                if let Some(wid) = state.find_window_by_proxy(&window) {
+                    if let Some(seat) = state.seats.iter_mut().find(|s| s.proxy.id() == sid) {
+                        seat.pointer_window = Some(wid);
+                    }
+                }
                 if data.config.focus_follows_mouse {
                     if let Some(wid) = state.find_window_by_proxy(&window) {
                         // Focus switches to the window under the pointer, and
@@ -159,6 +188,11 @@ impl Dispatch<RiverSeatV1, ()> for AppData {
                             }
                         }
                     }
+                }
+            }
+            SeatEvent::PointerLeave => {
+                if let Some(seat) = state.seats.iter_mut().find(|s| s.proxy.id() == sid) {
+                    seat.pointer_window = None;
                 }
             }
             SeatEvent::WindowInteraction { window } => {
@@ -177,6 +211,10 @@ impl Dispatch<RiverSeatV1, ()> for AppData {
                 }
             }
             SeatEvent::PointerPosition { x, y } => {
+                if let Some(seat) = state.seats.iter_mut().find(|s| s.proxy.id() == sid) {
+                    seat.pointer_x = x;
+                    seat.pointer_y = y;
+                }
                 // Track the raw pointer and switch the focused output to the one
                 // containing the pointer. This is what makes focus-follows-mouse
                 // work over *empty* desktop: river only sends pointer_enter when

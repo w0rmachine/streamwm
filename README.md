@@ -16,6 +16,10 @@ decorations.
   output when its output is removed.
 - **Keybindings** via `river-xkb-bindings-v1`, with arbitrary command `spawn`
   actions.
+- **Resize mode** (`Mod+r`): adjust the master/stack split with the arrow keys
+  (`←`/`→`, or `h`/`l`), `Escape` to leave.
+- **Floating windows** (toggle with `Mod+v`): drag with `Mod`+left-button,
+  resize with `Mod`+right-button.
 - **Lid-switch / clamshell** handling via systemd logind, switching kanshi
   profiles on open/close.
 - **Status/control** over a JSON Unix socket
@@ -52,3 +56,22 @@ defaulting to `/etc/streamwm/config.toml` if none is given. The `dotfiles` repo
 generates this config (at `~/.config/streamwm/config.toml`) and the river
 `init` script from Nix, and passes the path explicitly. See `src/config.rs`
 for the full schema.
+
+To keep certain windows out of the tiling layout (password prompts,
+calculators, the small Google Meet in-call window, etc.), list their app ids in
+`floating_app_ids`:
+
+```toml
+floating_app_ids = [
+  "polkit-gnome-authentication-agent-1",
+  "gnome-calculator",
+  "google-meet",
+]
+```
+
+The master/stack split and resize-step are also configurable:
+
+```toml
+master_fraction = 0.55   # master window width fraction (0.1..=0.9)
+resize_step = 0.05       # amount changed per resize-mode arrow key
+```

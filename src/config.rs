@@ -51,6 +51,21 @@ pub struct Config {
     /// Allow arbitrary spawn commands (security guard for status/control clients).
     #[serde(default)]
     pub allow_spawn: bool,
+
+    /// App ids of windows that should never be tiled (e.g. password prompts,
+    /// calculators, the small Google Meet in-call window). Matching windows are
+    /// made floating instead.
+    #[serde(default)]
+    pub floating_app_ids: Vec<String>,
+
+    /// Master fraction of the tiling layout (0.1..=0.9), adjustable in resize
+    /// mode via the Left/Right arrow keys.
+    #[serde(default = "default_master_fraction")]
+    pub master_fraction: f64,
+
+    /// How much the master fraction changes per resize-mode step.
+    #[serde(default = "default_resize_step")]
+    pub resize_step: f64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -104,6 +119,12 @@ fn default_focused_border_color() -> String {
 fn default_true() -> bool {
     true
 }
+fn default_master_fraction() -> f64 {
+    0.55
+}
+fn default_resize_step() -> f64 {
+    0.05
+}
 fn default_lid_close_profile() -> String {
     "office_clamshell".to_string()
 }
@@ -126,6 +147,11 @@ impl Config {
     /// Number of tags (fixed 1..=9).
     pub fn num_tags(&self) -> u32 {
         9
+    }
+
+    /// Whether a window with this app id should be floating (never tiled).
+    pub fn is_floating_app(&self, app_id: &str) -> bool {
+        self.floating_app_ids.iter().any(|id| id == app_id)
     }
 
     /// Parse a hex color like "4c4c4c" into (r,g,b) 0..255.
@@ -155,6 +181,9 @@ impl Default for Config {
             bindings: vec![],
             lid: Lid::default(),
             allow_spawn: false,
+            floating_app_ids: vec![],
+            master_fraction: default_master_fraction(),
+            resize_step: default_resize_step(),
         }
     }
 }
@@ -183,6 +212,38 @@ mod tests {
     #[test]
     fn default_matches_serde_security_defaults() {
         assert!(!Config::default().allow_spawn);
+    }
+
+    #[test]
+    fn parse_floating_app_ids_and_match() {
+        let c: Config = toml::from_str(
+            r#"
+floating_app_ids = ["polkit-gnome-authentication-agent-1", "gnome-calculator", "google-meet"]
+"#,
+        )
+        .unwrap();
+        assert_eq!(c.floating_app_ids.len(), 3);
+        assert!(c.is_floating_app("gnome-calculator"));
+        assert!(c.is_floating_app("google-meet"));
+        assert!(!c.is_floating_app("alacritty"));
+        assert!(Config::default().floating_app_ids.is_empty());
+    }
+
+    #[test]
+    fn default_and_parse_master_fraction_and_resize_step() {
+        let d = Config::default();
+        assert_eq!(d.master_fraction, 0.55);
+        assert_eq!(d.resize_step, 0.05);
+
+        let c: Config = toml::from_str(
+            r#"
+master_fraction = 0.6
+resize_step = 0.02
+"#,
+        )
+        .unwrap();
+        assert_eq!(c.master_fraction, 0.6);
+        assert_eq!(c.resize_step, 0.02);
     }
 
     #[test]

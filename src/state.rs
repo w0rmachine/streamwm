@@ -185,6 +185,10 @@ pub struct State {
     pub tags: Vec<Tag>,
     /// The output index that currently has seat focus.
     pub focused_output: Option<usize>,
+    /// Live master fraction for the tiling layout (adjustable in resize mode).
+    pub master_fraction: f64,
+    /// Whether the WM is in resize mode (arrow keys resize the layout).
+    pub resize_mode: bool,
 }
 
 impl State {
@@ -195,6 +199,8 @@ impl State {
             windows: Vec::new(),
             tags: (0..NUM_TAGS).map(|_| Tag::unassigned()).collect(),
             focused_output: None,
+            master_fraction: 0.55,
+            resize_mode: false,
         }
     }
 

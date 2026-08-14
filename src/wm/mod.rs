@@ -11,6 +11,10 @@ use crate::protocols::wm::river_window_manager_v1::RiverWindowManagerV1;
 pub fn on_manage_start(data: &mut AppData, wm: &RiverWindowManagerV1) {
     log::trace!("manage_start");
 
+    // Process queued interactive pointer operations (op_start_pointer /
+    // op_end) which must be issued inside a manage sequence.
+    crate::bindings::process_pointer_ops(data);
+
     {
         let mut state = data.state.borrow_mut();
         for output_idx in 0..state.outputs.len() {
@@ -124,10 +128,22 @@ pub fn on_manage_start(data: &mut AppData, wm: &RiverWindowManagerV1) {
                     .propose_dimensions(geom.width as i32, geom.height as i32);
             }
         }
+        // Propose dimensions for floating windows (their float_w/float_h, set
+        // by interactive resize).
+        for window in state.windows.iter().filter(|w| w.floating) {
+            if window.float_w > 0 && window.float_h > 0 {
+                window
+                    .proxy
+                    .propose_dimensions(window.float_w as i32, window.float_h as i32);
+            }
+        }
     }
 
     // Enable any keybindings that were created before this manage sequence.
     for (binding, _action) in &data.bindings {
+        binding.enable();
+    }
+    for (binding, _action) in &data.pointer_bindings {
         binding.enable();
     }
 
