@@ -58,7 +58,7 @@ pub struct WindowSnap {
 }
 
 /// A control command sent from the socket thread to the event loop.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     FocusTag(u32),
     SendToTag(u32),
@@ -75,10 +75,7 @@ pub fn build_snapshot(state: &State, allow_spawn: bool) -> StatusSnapshot {
     let mut snapshot = StatusSnapshot::default();
 
     for (i, output) in state.outputs.iter().enumerate() {
-        let name = output
-            .name
-            .clone()
-            .unwrap_or_else(|| format!("output-{i}"));
+        let name = output.name.clone().unwrap_or_else(|| format!("output-{i}"));
 
         if Some(i) == focused_output_idx {
             snapshot.focused_output = Some(name.clone());
@@ -94,6 +91,7 @@ pub fn build_snapshot(state: &State, allow_spawn: bool) -> StatusSnapshot {
         let windows = state
             .windows
             .iter()
+            .filter(|w| w.output == i)
             .map(|w| WindowSnap {
                 id: w.id,
                 app_id: w.app_id.clone(),
@@ -122,10 +120,7 @@ pub fn build_snapshot(state: &State, allow_spawn: bool) -> StatusSnapshot {
 ///
 /// Returns a `Receiver<Command>` the event loop must poll, plus the
 /// `Arc<Mutex<StatusSnapshot>>` the loop updates and the socket writes.
-pub fn start() -> (
-    mpsc::Receiver<Command>,
-    Arc<Mutex<StatusSnapshot>>,
-) {
+pub fn start() -> (mpsc::Receiver<Command>, Arc<Mutex<StatusSnapshot>>) {
     let socket_path = socket_path();
     let snapshot = Arc::new(Mutex::new(StatusSnapshot::default()));
     let (tx, rx) = mpsc::channel::<Command>();
@@ -191,36 +186,40 @@ fn handle_client(
             continue;
         };
         let name = cmd.get("cmd").and_then(|v| v.as_str()).unwrap_or("");
-        let result = match name {
-            "focus_tag" => cmd
-                .get("tag")
-                .and_then(|v| v.as_u64())
-                .map(|t| (Command::FocusTag(t as u32), "ok")),
-            "send_to_tag" => cmd
-                .get("tag")
-                .and_then(|v| v.as_u64())
-                .map(|t| (Command::SendToTag(t as u32), "ok")),
-            "focus_output" => cmd
-                .get("output")
-                .and_then(|v| v.as_str())
-                .map(|o| (Command::FocusOutput(o.to_string()), "ok")),
-            "spawn" => cmd
-                .get("command")
-                .and_then(|v| v.as_str())
-                .map(|c| (Command::Spawn(c.to_string()), "ok")),
-            "quit" => Some((Command::Quit, "ok")),
-            _ => None,
-        };
+        let result = parse_command_value(&cmd);
 
         match result {
-            Some((cmd, msg)) => {
+            Some(cmd) => {
                 let _ = tx.send(cmd);
-                let _ = writeln!(writer, "{{\"status\":\"{msg}\"}}");
+                let _ = writeln!(writer, "{{\"status\":\"ok\"}}");
             }
             None => {
                 let _ = writeln!(writer, "{{\"error\":\"unknown command: {name}\"}}");
             }
         }
+    }
+}
+
+fn parse_command_value(cmd: &serde_json::Value) -> Option<Command> {
+    match cmd.get("cmd").and_then(|v| v.as_str()).unwrap_or("") {
+        "focus_tag" => cmd
+            .get("tag")
+            .and_then(|v| v.as_u64())
+            .map(|t| Command::FocusTag(t as u32)),
+        "send_to_tag" => cmd
+            .get("tag")
+            .and_then(|v| v.as_u64())
+            .map(|t| Command::SendToTag(t as u32)),
+        "focus_output" => cmd
+            .get("output")
+            .and_then(|v| v.as_str())
+            .map(|o| Command::FocusOutput(o.to_string())),
+        "spawn" => cmd
+            .get("command")
+            .and_then(|v| v.as_str())
+            .map(|c| Command::Spawn(c.to_string())),
+        "quit" => Some(Command::Quit),
+        _ => None,
     }
 }
 
@@ -248,8 +247,9 @@ pub fn apply_command(data: &mut crate::connection::AppData, cmd: Command) {
                 let fid = s.outputs[idx].focused_window;
                 if let Some(fid) = fid {
                     if let Some(w) = s.find_window(fid) {
+                        let tag = w.tag;
                         // Ensure the tag is active.
-                        s.outputs[idx].active_mask |= 1u32 << w.tag;
+                        s.outputs[idx].active_mask = 1u32 << tag;
                     }
                 }
             }
@@ -279,5 +279,46 @@ pub fn refresh_snapshot(data: &crate::connection::AppData) {
         if let Ok(mut guard) = snapshot.lock() {
             *guard = snap;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parses_control_commands() {
+        assert_eq!(
+            parse_command_value(&json!({ "cmd": "focus_tag", "tag": 4 })),
+            Some(Command::FocusTag(4))
+        );
+        assert_eq!(
+            parse_command_value(&json!({ "cmd": "send_to_tag", "tag": 8 })),
+            Some(Command::SendToTag(8))
+        );
+        assert_eq!(
+            parse_command_value(&json!({ "cmd": "focus_output", "output": "eDP-1" })),
+            Some(Command::FocusOutput("eDP-1".into()))
+        );
+        assert_eq!(
+            parse_command_value(&json!({ "cmd": "spawn", "command": "foot" })),
+            Some(Command::Spawn("foot".into()))
+        );
+        assert_eq!(
+            parse_command_value(&json!({ "cmd": "quit" })),
+            Some(Command::Quit)
+        );
+    }
+
+    #[test]
+    fn rejects_missing_or_wrong_command_args() {
+        assert_eq!(parse_command_value(&json!({ "cmd": "focus_tag" })), None);
+        assert_eq!(
+            parse_command_value(&json!({ "cmd": "focus_tag", "tag": "4" })),
+            None
+        );
+        assert_eq!(parse_command_value(&json!({ "cmd": "focus_output" })), None);
+        assert_eq!(parse_command_value(&json!({ "cmd": "unknown" })), None);
     }
 }

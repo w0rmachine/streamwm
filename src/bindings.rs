@@ -54,7 +54,7 @@ fn parse_keysym(name: &str) -> Option<u32> {
 /// Parse a comma-separated modifier list into river's Modifiers bitflags.
 fn parse_modifiers(s: &str, config_modifier: &str) -> Modifiers {
     let mut m = Modifiers::empty();
-    for part in s.split(',') {
+    for part in s.split([',', '+']) {
         match part.trim().to_ascii_lowercase().as_str() {
             "" => {}
             "shift" => m |= Modifiers::Shift,
@@ -97,7 +97,13 @@ pub fn default_bindings(config: &crate::config::Config) -> Vec<(String, String, 
         binds.push((key, "shift".into(), format!("send_to_tag:{t}")));
     }
     for b in &config.bindings {
-        binds.push((b.keysym.clone(), b.modifiers.clone(), b.action.clone()));
+        let action = match &b.arg {
+            Some(arg) if !arg.is_empty() && !b.action.contains(':') => {
+                format!("{}:{arg}", b.action)
+            }
+            _ => b.action.clone(),
+        };
+        binds.push((b.keysym.clone(), b.modifiers.clone(), action));
     }
     binds
 }
@@ -145,24 +151,30 @@ fn run_action(data: &mut AppData, action: &str) {
         None => (action, None),
     };
 
+    // Whether this action changed window management state and needs a manage
+    // sequence. Protocol requests (close/fullscreen/focus/propose_dimensions)
+    // may only be made inside a manage sequence, so we defer them to
+    // on_manage_start and request one here via manage_dirty.
+    let mut needs_manage = false;
+
     match name {
         "spawn_terminal" => crate::wm::spawn::spawn(&data.config.terminal),
         "spawn_launcher" => crate::wm::spawn::spawn(&data.config.launcher),
         "spawn" => {
             if data.config.allow_spawn {
-                if let Some(cmd) = arg.or_else(|| None) {
+                if let Some(cmd) = arg {
                     crate::wm::spawn::spawn(cmd);
                 }
             }
         }
         "close" => {
-            let s = data.state.borrow_mut();
-            if let Some(o) = s.active_output() {
-                if let Some(fid) = s.outputs[o].focused_window {
-                    if let Some(w) = s.find_window(fid) {
-                        w.proxy.close();
-                    }
-                }
+            let fid = {
+                let s = data.state.borrow();
+                s.active_output().and_then(|o| s.outputs[o].focused_window)
+            };
+            if let Some(fid) = fid {
+                data.pending_close.push(fid);
+                needs_manage = true;
             }
         }
         "focus_next" | "focus_prev" => {
@@ -172,20 +184,22 @@ fn run_action(data: &mut AppData, action: &str) {
                 let ids: Vec<u32> = s
                     .windows
                     .iter()
-                    .filter(|w| (active >> w.tag) & 1 == 1 && !w.floating)
+                    .filter(|w| w.output == o && (active >> w.tag) & 1 == 1 && !w.floating)
                     .map(|w| w.id)
                     .collect();
-                if ids.is_empty() {
-                    return;
+                if !ids.is_empty() {
+                    let cur = s.outputs[o].focused_window;
+                    let idx = cur
+                        .and_then(|f| ids.iter().position(|i| *i == f))
+                        .unwrap_or(0);
+                    let next = if name == "focus_next" {
+                        (idx + 1) % ids.len()
+                    } else {
+                        (idx + ids.len() - 1) % ids.len()
+                    };
+                    s.outputs[o].focused_window = Some(ids[next]);
+                    needs_manage = true;
                 }
-                let cur = s.outputs[o].focused_window;
-                let idx = cur.and_then(|f| ids.iter().position(|i| *i == f)).unwrap_or(0);
-                let next = if name == "focus_next" {
-                    (idx + 1) % ids.len()
-                } else {
-                    (idx + ids.len() - 1) % ids.len()
-                };
-                s.outputs[o].focused_window = Some(ids[next]);
             }
         }
         "focus_tag" => {
@@ -193,6 +207,7 @@ fn run_action(data: &mut AppData, action: &str) {
                 let mut s = data.state.borrow_mut();
                 if let Some(o) = s.active_output() {
                     s.focus_tag(o, tag);
+                    needs_manage = true;
                 }
             }
         }
@@ -201,22 +216,19 @@ fn run_action(data: &mut AppData, action: &str) {
                 let mut s = data.state.borrow_mut();
                 if let Some(o) = s.active_output() {
                     s.send_focused_to_tag(o, tag);
+                    needs_manage = true;
                 }
             }
         }
         "fullscreen" => {
+            // Toggle desired state; the protocol request is applied in
+            // on_manage_start.
             let mut s = data.state.borrow_mut();
             if let Some(o) = s.active_output() {
-                let output_proxy = s.outputs[o].proxy.clone();
                 if let Some(fid) = s.outputs[o].focused_window {
                     if let Some(w) = s.find_window_mut(fid) {
-                        if w.fullscreen {
-                            w.proxy.exit_fullscreen();
-                            w.fullscreen = false;
-                        } else {
-                            w.proxy.fullscreen(&output_proxy);
-                            w.fullscreen = true;
-                        }
+                        w.fullscreen = !w.fullscreen;
+                        needs_manage = true;
                     }
                 }
             }
@@ -227,6 +239,7 @@ fn run_action(data: &mut AppData, action: &str) {
                 if let Some(fid) = s.outputs[o].focused_window {
                     if let Some(w) = s.find_window_mut(fid) {
                         w.floating = !w.floating;
+                        needs_manage = true;
                     }
                 }
             }
@@ -242,6 +255,12 @@ fn run_action(data: &mut AppData, action: &str) {
             log::debug!("unhandled action: {name}");
         }
     }
+
+    if needs_manage {
+        if let Some(wm) = &data.wm {
+            wm.manage_dirty();
+        }
+    }
 }
 
 impl Dispatch<RiverXkbBindingV1, ()> for AppData {
@@ -253,8 +272,86 @@ impl Dispatch<RiverXkbBindingV1, ()> for AppData {
         _conn: &WlConnection,
         _qh: &QueueHandle<Self>,
     ) {
-        if let XkbBindingEvent::Pressed {} = event {
+        if let XkbBindingEvent::Pressed = event {
             dispatch_action(data, binding);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{Binding, Config};
+
+    #[test]
+    fn configured_binding_arg_becomes_action_suffix() {
+        let mut config = Config::default();
+        config.bindings.push(Binding {
+            keysym: "F1".into(),
+            modifiers: "shift".into(),
+            action: "spawn".into(),
+            arg: Some("foot".into()),
+        });
+
+        assert!(default_bindings(&config)
+            .iter()
+            .any(|(key, modifiers, action)| key == "F1"
+                && modifiers == "shift"
+                && action == "spawn:foot"));
+    }
+
+    #[test]
+    fn configured_binding_with_inline_arg_is_not_double_suffixed() {
+        let mut config = Config::default();
+        config.bindings.push(Binding {
+            keysym: "F2".into(),
+            modifiers: "".into(),
+            action: "focus_tag:3".into(),
+            arg: Some("9".into()),
+        });
+
+        assert!(default_bindings(&config)
+            .iter()
+            .any(|(_, _, action)| action == "focus_tag:3"));
+        assert!(!default_bindings(&config)
+            .iter()
+            .any(|(_, _, action)| action == "focus_tag:3:9"));
+    }
+
+    #[test]
+    fn default_bindings_cover_tags_and_core_actions() {
+        let bindings = default_bindings(&Config::default());
+
+        assert!(bindings
+            .iter()
+            .any(|(_, _, action)| action == "spawn_terminal"));
+        assert!(bindings.iter().any(|(_, _, action)| action == "focus_next"));
+        assert!(bindings.iter().any(|(key, modifiers, action)| key == "0"
+            && modifiers.is_empty()
+            && action == "focus_tag:0"));
+        assert!(bindings.iter().any(|(key, modifiers, action)| key == "9"
+            && modifiers == "shift"
+            && action == "send_to_tag:9"));
+    }
+
+    #[test]
+    fn keysym_parser_handles_known_and_unknown_values() {
+        assert_eq!(parse_keysym("a"), Some('a' as u32));
+        assert_eq!(parse_keysym("Return"), Some(0xff0d));
+        assert_eq!(parse_keysym("XF86AudioMute"), Some(269025042));
+        assert_eq!(parse_keysym("NotAKeysym"), None);
+    }
+
+    #[test]
+    fn modifier_parser_accepts_commas_plus_and_config_default() {
+        let explicit = parse_modifiers("shift+ctrl,alt", "super");
+        assert!(explicit.contains(Modifiers::Shift));
+        assert!(explicit.contains(Modifiers::Ctrl));
+        assert!(explicit.contains(Modifiers::Mod1));
+        assert!(!explicit.contains(Modifiers::Mod4));
+
+        assert!(parse_modifiers("", "super").contains(Modifiers::Mod4));
+        assert!(parse_modifiers("", "alt").contains(Modifiers::Mod1));
+        assert!(parse_modifiers("", "ctrl").contains(Modifiers::Ctrl));
     }
 }

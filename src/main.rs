@@ -12,10 +12,14 @@ mod status;
 mod wm;
 
 fn main() {
+    if std::env::var("RUST_LOG").is_err() {
+        std::env::set_var("RUST_LOG", "info");
+    }
     env_logger::init();
 
-    let config_path =
-        std::env::args().nth(1).unwrap_or_else(|| "/etc/streamwm/config.toml".to_string());
+    let config_path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "/etc/streamwm/config.toml".to_string());
     let config = config::Config::load(&config_path);
     log::info!("streamwm starting ({} tags)", config.num_tags());
 

@@ -18,6 +18,59 @@ pub fn on_manage_start(data: &mut AppData, wm: &RiverWindowManagerV1) {
         }
     }
 
+    // Newly created windows are shown by default in the river protocol. Keep
+    // every window hidden until the render sequence shows the final visible set.
+    {
+        let state = data.state.borrow();
+        for window in state.windows.iter() {
+            window.proxy.hide();
+        }
+    }
+
+    // Apply deferred close requests (window management state, so this must
+    // happen inside a manage sequence).
+    let pending_close = std::mem::take(&mut data.pending_close);
+    {
+        let state = data.state.borrow();
+        for fid in pending_close {
+            if let Some(w) = state.find_window(fid) {
+                w.proxy.close();
+            }
+        }
+    }
+
+    // Apply pending fullscreen state changes (window management state).
+    {
+        let mut state = data.state.borrow_mut();
+        let outputs: Vec<_> = state
+            .outputs
+            .iter()
+            .map(|output| output.proxy.clone())
+            .collect();
+        for w in state.windows.iter_mut() {
+            if w.ssd_applied != Some(data.config.use_ssd) {
+                if data.config.use_ssd {
+                    w.proxy.use_ssd();
+                } else {
+                    w.proxy.use_csd();
+                }
+                w.ssd_applied = Some(data.config.use_ssd);
+            }
+
+            if w.fullscreen != w.fullscreen_applied {
+                if w.fullscreen {
+                    if let Some(output) = outputs.get(w.output) {
+                        w.proxy.fullscreen(output);
+                        w.fullscreen_applied = true;
+                    }
+                } else {
+                    w.proxy.exit_fullscreen();
+                    w.fullscreen_applied = false;
+                }
+            }
+        }
+    }
+
     // Set a default layer-shell output once (required so clients with no
     // explicit output preference can map their surfaces).
     if !data.layer_default_set {

@@ -1,7 +1,10 @@
 //! Dispatch implementations for river window/output/seat events, updating the
 //! data model (titles, app ids, dimensions, output geometry, focus).
 
-use wayland_client::{Connection as WlConnection, Dispatch, Proxy, QueueHandle};
+use wayland_client::{
+    protocol::wl_output::{Event as WlOutputEvent, WlOutput},
+    Connection as WlConnection, Dispatch, Proxy, QueueHandle,
+};
 
 use crate::connection::AppData;
 use crate::protocols::wm::river_output_v1::{Event as OutputEvent, RiverOutputV1};
@@ -23,7 +26,7 @@ impl Dispatch<RiverWindowV1, ()> for AppData {
             return;
         };
         match event {
-            WindowEvent::Closed {} => {
+            WindowEvent::Closed => {
                 state.windows.retain(|w| w.proxy.id() != oid);
             }
             WindowEvent::AppId { app_id } => {
@@ -70,8 +73,23 @@ impl Dispatch<RiverOutputV1, ()> for AppData {
                 state.outputs[idx].width = width as u32;
                 state.outputs[idx].height = height as u32;
             }
-            OutputEvent::Removed {} => {
+            OutputEvent::WlOutput { name } => {
+                state.outputs[idx].wl_global = Some(name);
+                if let (Some(registry), Some(qh)) = (data.registry.clone(), data.qh.clone()) {
+                    let wl_output = registry.bind::<WlOutput, _, _>(name, 4, &qh, name);
+                    state.outputs[idx].wl_output = Some(wl_output);
+                }
+            }
+            OutputEvent::Removed => {
                 state.outputs.remove(idx);
+                let outputs_empty = state.outputs.is_empty();
+                for w in state.windows.iter_mut() {
+                    if outputs_empty || w.output == idx {
+                        w.output = 0;
+                    } else if w.output > idx {
+                        w.output -= 1;
+                    }
+                }
                 // Recompute focus if the focused output was removed.
                 if state.focused_output == Some(idx) {
                     state.focused_output = if state.outputs.is_empty() {
@@ -79,9 +97,10 @@ impl Dispatch<RiverOutputV1, ()> for AppData {
                     } else {
                         Some(0)
                     };
+                } else if state.focused_output.is_some_and(|focused| focused > idx) {
+                    state.focused_output = state.focused_output.map(|focused| focused - 1);
                 }
             }
-            _ => {}
         }
     }
 }
@@ -103,11 +122,13 @@ impl Dispatch<RiverSeatV1, ()> for AppData {
                     if let Some(wid) = state.find_window_by_proxy(&window) {
                         // Focus switches to the window under the pointer, and
                         // thus to its output/tag.
-                        if let Some(tag) = state.find_window(wid).map(|w| w.tag) {
-                            if let Some(o) = state.active_output() {
-                                state.outputs[o].focused_window = Some(wid);
-                                // If the window is on another tag, activate it.
-                                state.outputs[o].active_mask |= 1u32 << tag;
+                        if let Some((output, tag)) =
+                            state.find_window(wid).map(|w| (w.output, w.tag))
+                        {
+                            if output < state.outputs.len() {
+                                state.focused_output = Some(output);
+                                state.outputs[output].focused_window = Some(wid);
+                                state.outputs[output].active_mask = 1u32 << tag;
                             }
                         }
                     }
@@ -117,18 +138,41 @@ impl Dispatch<RiverSeatV1, ()> for AppData {
                 // A pointer button press / touch on a window: focus it,
                 // regardless of focus-follows-mouse.
                 if let Some(wid) = state.find_window_by_proxy(&window) {
-                    if let Some(tag) = state.find_window(wid).map(|w| w.tag) {
-                        if let Some(o) = state.active_output() {
-                            state.outputs[o].focused_window = Some(wid);
-                            state.outputs[o].active_mask |= 1u32 << tag;
+                    if let Some((output, tag)) = state.find_window(wid).map(|w| (w.output, w.tag)) {
+                        if output < state.outputs.len() {
+                            state.focused_output = Some(output);
+                            state.outputs[output].focused_window = Some(wid);
+                            state.outputs[output].active_mask = 1u32 << tag;
                         }
                     }
                 }
             }
-            SeatEvent::Removed {} => {
+            SeatEvent::Removed => {
                 state.seats.retain(|s| s.proxy.id() != sid);
             }
             _ => {}
+        }
+    }
+}
+
+impl Dispatch<WlOutput, u32> for AppData {
+    fn event(
+        data: &mut Self,
+        _output: &WlOutput,
+        event: WlOutputEvent,
+        wl_global: &u32,
+        _conn: &WlConnection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let WlOutputEvent::Name { name } = event {
+            let mut state = data.state.borrow_mut();
+            if let Some(output) = state
+                .outputs
+                .iter_mut()
+                .find(|output| output.wl_global == Some(*wl_global))
+            {
+                output.name = Some(name);
+            }
         }
     }
 }

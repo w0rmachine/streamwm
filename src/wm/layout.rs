@@ -1,11 +1,11 @@
 //! Tiling layout computation and window positioning.
 
-use crate::connection::AppData;
 use crate::config::Config;
+use crate::connection::AppData;
 use crate::state::State;
 
 /// A window geometry in logical pixels (global coordinates).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Geometry {
     pub x: i32,
     pub y: i32,
@@ -33,7 +33,7 @@ fn visible_windows(state: &State, output_idx: usize) -> Vec<u32> {
     let mut ids: Vec<u32> = state
         .windows
         .iter()
-        .filter(|w| (active >> w.tag) & 1 == 1 && !w.floating)
+        .filter(|w| w.output == output_idx && (active >> w.tag) & 1 == 1 && !w.floating)
         .map(|w| w.id)
         .collect();
     // Focused window first (becomes the master).
@@ -60,31 +60,72 @@ fn compute_output(state: &State, output_idx: usize, config: &Config) -> Vec<(u32
     let area_w = (output.width as i32 - gap * 2).max(0) as u32;
     let area_h = (output.height as i32 - gap * 2).max(0) as u32;
 
+    compute_tiling(
+        &ids,
+        Geometry {
+            x: area_x,
+            y: area_y,
+            width: area_w,
+            height: area_h,
+        },
+        output.y + output.height as i32,
+        gap,
+    )
+}
+
+fn compute_tiling(
+    ids: &[u32],
+    area: Geometry,
+    output_bottom: i32,
+    gap: i32,
+) -> Vec<(u32, Geometry)> {
     let n = ids.len();
     let mut result = Vec::with_capacity(n);
 
-    if n == 1 {
-        result.push((ids[0], Geometry { x: area_x, y: area_y, width: area_w, height: area_h }));
+    if ids.is_empty() {
         return result;
     }
 
-    let master_w = ((area_w as f64 * MASTER_FRACTION) as i32).max(0) as u32;
-    result.push((ids[0], Geometry { x: area_x, y: area_y, width: master_w, height: area_h }));
+    if n == 1 {
+        result.push((ids[0], area));
+        return result;
+    }
 
-    let stack_x = area_x + master_w as i32 + gap;
-    let stack_w = (area_w as i32 - master_w as i32 - gap).max(0) as u32;
+    let master_w = ((area.width as f64 * MASTER_FRACTION) as i32).max(0) as u32;
+    result.push((
+        ids[0],
+        Geometry {
+            x: area.x,
+            y: area.y,
+            width: master_w,
+            height: area.height,
+        },
+    ));
+
+    let stack_x = area.x + master_w as i32 + gap;
+    let stack_w = (area.width as i32 - master_w as i32 - gap).max(0) as u32;
     let stack_n = (n - 1) as u32;
-    let stack_h =
-        (area_h.saturating_sub((stack_n.saturating_sub(1)) * gap as u32)) / stack_n.max(1);
+    let stack_h = (area
+        .height
+        .saturating_sub((stack_n.saturating_sub(1)) * gap as u32))
+        / stack_n.max(1);
 
     for (i, id) in ids.iter().skip(1).enumerate() {
-        let y = area_y + i as i32 * (stack_h as i32 + gap);
+        let y = area.y + i as i32 * (stack_h as i32 + gap);
         let h = if i + 1 == n - 1 {
-            (output.y + output.height as i32 - gap - y).max(0) as u32
+            (output_bottom - gap - y).max(0) as u32
         } else {
             stack_h
         };
-        result.push((*id, Geometry { x: stack_x, y, width: stack_w, height: h }));
+        result.push((
+            *id,
+            Geometry {
+                x: stack_x,
+                y,
+                width: stack_w,
+                height: h,
+            },
+        ));
     }
 
     result
@@ -100,7 +141,9 @@ pub fn render_all_run(data: &mut AppData) {
 
     let focused = {
         let state = data.state.borrow();
-        state.active_output().and_then(|o| state.outputs[o].focused_window)
+        state
+            .active_output()
+            .and_then(|o| state.outputs[o].focused_window)
     };
 
     let (border_r, border_g, border_b) = config.color(&config.border_color);
@@ -119,8 +162,9 @@ pub fn render_all_run(data: &mut AppData) {
                     .map(|(_, g)| *g);
                 let floating_visible = w.floating
                     && state
-                        .active_output()
-                        .map(|o| (state.outputs[o].active_mask >> w.tag) & 1 == 1)
+                        .outputs
+                        .get(w.output)
+                        .map(|o| (o.active_mask >> w.tag) & 1 == 1)
                         .unwrap_or(false);
                 (w.id, geom.is_some() || floating_visible, geom)
             })
@@ -169,6 +213,90 @@ pub fn render_all_run(data: &mut AppData) {
 
 /// Convert 8-bit color components to river's 32-bit RGBA (pre-multiplied).
 fn to_32bit(r: u8, g: u8, b: u8) -> (u32, u32, u32, u32) {
-    let f = |v: u8| -> u32 { (v as u32 * 0xFFFF_FFFF) / 255 };
+    let f = |v: u8| -> u32 { ((v as u64 * 0xFFFF_FFFFu64) / 255) as u32 };
     (f(0xff), f(r), f(g), f(b))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tiling_empty_has_no_geometry() {
+        assert!(compute_tiling(
+            &[],
+            Geometry {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 100
+            },
+            100,
+            4
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn tiling_single_window_fills_area() {
+        let area = Geometry {
+            x: 10,
+            y: 20,
+            width: 800,
+            height: 600,
+        };
+
+        assert_eq!(compute_tiling(&[7], area, 620, 8), vec![(7, area)]);
+    }
+
+    #[test]
+    fn tiling_three_windows_uses_master_and_even_stack() {
+        let area = Geometry {
+            x: 10,
+            y: 10,
+            width: 980,
+            height: 580,
+        };
+
+        assert_eq!(
+            compute_tiling(&[1, 2, 3], area, 600, 10),
+            vec![
+                (
+                    1,
+                    Geometry {
+                        x: 10,
+                        y: 10,
+                        width: 539,
+                        height: 580,
+                    },
+                ),
+                (
+                    2,
+                    Geometry {
+                        x: 559,
+                        y: 10,
+                        width: 431,
+                        height: 285,
+                    },
+                ),
+                (
+                    3,
+                    Geometry {
+                        x: 559,
+                        y: 305,
+                        width: 431,
+                        height: 285,
+                    },
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn color_conversion_maps_8_bit_to_protocol_range() {
+        assert_eq!(
+            to_32bit(0, 127, 255),
+            (0xFFFF_FFFF, 0, 0x7F7F_7F7F, 0xFFFF_FFFF)
+        );
+    }
 }

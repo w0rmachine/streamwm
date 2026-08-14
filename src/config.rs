@@ -132,7 +132,11 @@ impl Config {
     pub fn color(&self, hex: &str) -> (u8, u8, u8) {
         let s = hex.trim_start_matches('#');
         let v = u32::from_str_radix(s, 16).unwrap_or(0);
-        (((v >> 16) & 0xff) as u8, ((v >> 8) & 0xff) as u8, (v & 0xff) as u8)
+        (
+            ((v >> 16) & 0xff) as u8,
+            ((v >> 8) & 0xff) as u8,
+            (v & 0xff) as u8,
+        )
     }
 }
 
@@ -150,7 +154,7 @@ impl Default for Config {
             use_ssd: true,
             bindings: vec![],
             lid: Lid::default(),
-            allow_spawn: true,
+            allow_spawn: false,
         }
     }
 }
@@ -165,6 +169,7 @@ mod tests {
         assert_eq!(c.modifier, "super");
         assert_eq!(c.gap, 4);
         assert_eq!(c.num_tags(), 10);
+        assert!(!c.allow_spawn);
     }
 
     #[test]
@@ -172,5 +177,57 @@ mod tests {
         let c = Config::default();
         assert_eq!(c.color("5294e2"), (0x52, 0x94, 0xe2));
         assert_eq!(c.color("#4c4c4c"), (0x4c, 0x4c, 0x4c));
+        assert_eq!(c.color("not-hex"), (0, 0, 0));
+    }
+
+    #[test]
+    fn default_matches_serde_security_defaults() {
+        assert!(!Config::default().allow_spawn);
+    }
+
+    #[test]
+    fn parse_full_binding_and_lid_config() {
+        let c: Config = toml::from_str(
+            r#"
+modifier = "alt"
+terminal = "foot"
+launcher = "fuzzel"
+gap = 12
+border_width = 3
+border_color = "101112"
+focused_border_color = "abcdef"
+focus_follows_mouse = false
+use_ssd = false
+allow_spawn = true
+
+[[bindings]]
+keysym = "F1"
+modifiers = "shift"
+action = "spawn"
+arg = "foot"
+
+[lid]
+enable = true
+close_profile = "closed"
+open_profile = "open"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(c.modifier, "alt");
+        assert_eq!(c.terminal, "foot");
+        assert_eq!(c.launcher, "fuzzel");
+        assert_eq!(c.gap, 12);
+        assert_eq!(c.border_width, 3);
+        assert_eq!(c.color(&c.border_color), (0x10, 0x11, 0x12));
+        assert_eq!(c.color(&c.focused_border_color), (0xab, 0xcd, 0xef));
+        assert!(!c.focus_follows_mouse);
+        assert!(!c.use_ssd);
+        assert!(c.allow_spawn);
+        assert_eq!(c.bindings.len(), 1);
+        assert_eq!(c.bindings[0].arg.as_deref(), Some("foot"));
+        assert!(c.lid.enable);
+        assert_eq!(c.lid.close_profile, "closed");
+        assert_eq!(c.lid.open_profile, "open");
     }
 }

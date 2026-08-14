@@ -5,8 +5,9 @@ use std::rc::Rc;
 
 use log::info;
 use wayland_client::{
-    delegate_noop, globals::registry_queue_init,
-    protocol::{wl_output::WlOutput, wl_registry, wl_seat::WlSeat, wl_surface::WlSurface},
+    delegate_noop,
+    globals::registry_queue_init,
+    protocol::{wl_registry, wl_seat::WlSeat, wl_surface::WlSurface},
     Connection as WlConnection, Dispatch, QueueHandle,
 };
 
@@ -35,6 +36,8 @@ pub struct AppData {
     pub quit: bool,
     /// Queue handle, set once after registry init.
     pub qh: Option<QueueHandle<AppData>>,
+    /// Wayland registry, kept so river_output_v1.wl_output names can be bound.
+    pub registry: Option<wl_registry::WlRegistry>,
     /// Active keybindings: (binding proxy, action).
     pub bindings: Vec<(
         crate::protocols::xkb_bindings::river_xkb_binding_v1::RiverXkbBindingV1,
@@ -42,6 +45,8 @@ pub struct AppData {
     )>,
     /// Whether the default layer-shell output has been set yet.
     pub layer_default_set: bool,
+    /// Windows queued to be closed at the start of the next manage sequence.
+    pub pending_close: Vec<u32>,
     /// Status snapshot, updated after render, read by the socket thread.
     pub snapshot: Option<std::sync::Arc<std::sync::Mutex<crate::status::StatusSnapshot>>>,
 }
@@ -56,23 +61,25 @@ impl AppData {
             config,
             quit: false,
             qh: None,
+            registry: None,
             bindings: Vec::new(),
             layer_default_set: false,
+            pending_close: Vec::new(),
             snapshot: None,
         }
     }
 }
 
 pub fn run(config: &Config) -> Result<(), String> {
-    let conn = wayland_client::Connection::connect_to_env()
-        .map_err(|e| format!("connect: {e}"))?;
+    let conn = wayland_client::Connection::connect_to_env().map_err(|e| format!("connect: {e}"))?;
     let state = Rc::new(RefCell::new(State::new()));
     let mut data = AppData::new(state, Rc::new(config.clone()));
 
-    let (globals, mut event_queue) = registry_queue_init::<AppData>(&conn)
-        .map_err(|e| format!("registry: {e}"))?;
+    let (globals, mut event_queue) =
+        registry_queue_init::<AppData>(&conn).map_err(|e| format!("registry: {e}"))?;
     let qh = event_queue.handle();
     data.qh = Some(qh.clone());
+    data.registry = Some(globals.registry().clone());
 
     bind_globals(&globals, &qh, &mut data)?;
 
@@ -150,7 +157,20 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppData {
                 data.quit = true;
             }
             WmEvent::Window { id } => {
-                data.state.borrow_mut().windows.push(Window::new(id));
+                let mut state = data.state.borrow_mut();
+                let output = state.active_output().unwrap_or(0);
+                let tag = state
+                    .outputs
+                    .get(output)
+                    .map(|o| o.first_active_tag())
+                    .unwrap_or(0);
+                state.windows.push(Window::new(id, output, tag));
+                if let Some(window) = state.windows.last() {
+                    let wid = window.id;
+                    if let Some(out) = state.outputs.get_mut(output) {
+                        out.focused_window = Some(wid);
+                    }
+                }
             }
             WmEvent::Output { id } => {
                 let mut s = data.state.borrow_mut();
@@ -242,7 +262,6 @@ impl Dispatch<wl_registry::WlRegistry, wayland_client::globals::GlobalListConten
 
 delegate_noop!(AppData: ignore RiverNodeV1);
 delegate_noop!(AppData: ignore RiverXkbBindingsV1);
-delegate_noop!(AppData: ignore WlOutput);
 delegate_noop!(AppData: ignore WlSeat);
 delegate_noop!(AppData: ignore WlSurface);
 delegate_noop!(AppData: ignore crate::protocols::layer_shell::river_layer_shell_v1::RiverLayerShellV1);

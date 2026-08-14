@@ -2,12 +2,10 @@
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use wayland_client::protocol::wl_output::WlOutput;
 use wayland_client::Proxy;
 
-use crate::protocols::wm::{
-    river_seat_v1::RiverSeatV1,
-    river_window_v1::RiverWindowV1,
-};
+use crate::protocols::wm::{river_seat_v1::RiverSeatV1, river_window_v1::RiverWindowV1};
 
 /// Global monotonically-increasing id allocator for streamwm window ids
 /// (used in our status protocol; distinct from river object ids).
@@ -16,11 +14,17 @@ static NEXT_WINDOW_ID: AtomicU32 = AtomicU32::new(1);
 /// Number of tags per output (0..=9).
 pub const NUM_TAGS: usize = 10;
 
+fn first_active_tag_in_mask(mask: u32) -> usize {
+    (0..NUM_TAGS).find(|t| (mask >> t) & 1 == 1).unwrap_or(0)
+}
+
 /// A logical window under management.
 pub struct Window {
     pub proxy: RiverWindowV1,
     /// streamwm id exposed to the status protocol.
     pub id: u32,
+    /// Output this window belongs to.
+    pub output: usize,
     pub app_id: Option<String>,
     pub title: Option<String>,
     /// Tag id this window currently belongs to (0..=9).
@@ -35,20 +39,25 @@ pub struct Window {
     /// Last known content dimensions (from river_window_v1.dimensions).
     pub width: u32,
     pub height: u32,
-    /// Whether the window is fullscreen.
+    /// Whether the window should be fullscreen (desired state).
     pub fullscreen: bool,
+    /// Whether the fullscreen request matching `fullscreen` has been sent.
+    pub fullscreen_applied: bool,
+    /// Last decoration mode sent to river (`true` = SSD, `false` = CSD).
+    pub ssd_applied: Option<bool>,
     /// Render node (obtained once via get_node).
     pub node: Option<crate::protocols::wm::river_node_v1::RiverNodeV1>,
 }
 
 impl Window {
-    pub fn new(proxy: RiverWindowV1) -> Window {
+    pub fn new(proxy: RiverWindowV1, output: usize, tag: usize) -> Window {
         Window {
             id: NEXT_WINDOW_ID.fetch_add(1, Ordering::Relaxed),
             proxy,
+            output,
             app_id: None,
             title: None,
-            tag: 0,
+            tag,
             floating: false,
             float_x: 0,
             float_y: 0,
@@ -57,6 +66,8 @@ impl Window {
             width: 0,
             height: 0,
             fullscreen: false,
+            fullscreen_applied: false,
+            ssd_applied: None,
             node: None,
         }
     }
@@ -67,6 +78,10 @@ pub struct Output {
     pub proxy: crate::protocols::wm::river_output_v1::RiverOutputV1,
     /// Output name (e.g. eDP-1), populated once wl_output is resolved.
     pub name: Option<String>,
+    /// wl_output global name announced by river_output_v1.wl_output.
+    pub wl_global: Option<u32>,
+    /// Bound wl_output proxy kept alive so WlOutput::name arrives.
+    pub wl_output: Option<WlOutput>,
     pub x: i32,
     pub y: i32,
     pub width: u32,
@@ -82,16 +97,17 @@ pub struct Output {
     /// Focused window id (streamwm id) on this output, if any.
     pub focused_window: Option<u32>,
     /// Layer-shell output state (created once via get_output).
-    pub layer: Option<crate::protocols::layer_shell::river_layer_shell_output_v1::RiverLayerShellOutputV1>,
+    pub layer:
+        Option<crate::protocols::layer_shell::river_layer_shell_output_v1::RiverLayerShellOutputV1>,
 }
 
 impl Output {
-    pub fn new(
-        proxy: crate::protocols::wm::river_output_v1::RiverOutputV1,
-    ) -> Output {
+    pub fn new(proxy: crate::protocols::wm::river_output_v1::RiverOutputV1) -> Output {
         Output {
             proxy,
             name: None,
+            wl_global: None,
+            wl_output: None,
             x: 0,
             y: 0,
             width: 0,
@@ -110,6 +126,10 @@ impl Output {
             .filter(|t| (self.active_mask >> t) & 1 == 1)
             .collect()
     }
+
+    pub fn first_active_tag(&self) -> usize {
+        first_active_tag_in_mask(self.active_mask)
+    }
 }
 
 /// A seat (input device group).
@@ -120,7 +140,8 @@ pub struct Seat {
     /// Window currently under the pointer (streamwm id), if any.
     pub pointer_window: Option<u32>,
     /// Layer-shell seat state (created once via get_seat).
-    pub layer: Option<crate::protocols::layer_shell::river_layer_shell_seat_v1::RiverLayerShellSeatV1>,
+    pub layer:
+        Option<crate::protocols::layer_shell::river_layer_shell_seat_v1::RiverLayerShellSeatV1>,
 }
 
 impl Seat {
@@ -172,22 +193,25 @@ impl State {
 
     /// Output index by name.
     pub fn find_output_by_name(&self, name: &str) -> Option<usize> {
-        self.outputs.iter().position(|o| o.name.as_deref() == Some(name))
+        self.outputs
+            .iter()
+            .position(|o| o.name.as_deref() == Some(name))
     }
 
     /// The focused output index, or the first output (0) as fallback.
     pub fn active_output(&self) -> Option<usize> {
-        self.focused_output.or_else(|| {
-            if self.outputs.is_empty() {
-                None
-            } else {
-                Some(0)
-            }
+        self.focused_output.or(if self.outputs.is_empty() {
+            None
+        } else {
+            Some(0)
         })
     }
 
     /// Set the active tag mask of an output to a single tag.
     pub fn focus_tag(&mut self, output_idx: usize, tag: usize) {
+        if tag >= NUM_TAGS {
+            return;
+        }
         if let Some(o) = self.outputs.get_mut(output_idx) {
             o.active_mask = 1u32 << tag;
             // Move focus to the topmost window of that tag.
@@ -197,6 +221,9 @@ impl State {
 
     /// Move the focused window of an output to a tag.
     pub fn send_focused_to_tag(&mut self, output_idx: usize, tag: usize) {
+        if tag >= NUM_TAGS || output_idx >= self.outputs.len() {
+            return;
+        }
         let focused = self.outputs[output_idx].focused_window;
         if let Some(fid) = focused {
             if let Some(w) = self.find_window_mut(fid) {
@@ -210,7 +237,9 @@ impl State {
         // Recompute occupancy.
         let mut occupied = 0u32;
         for w in self.windows.iter() {
-            occupied |= 1u32 << w.tag;
+            if w.output == output_idx {
+                occupied |= 1u32 << w.tag;
+            }
         }
         let active = {
             let o = &self.outputs[output_idx];
@@ -228,7 +257,7 @@ impl State {
         // Keep focus if the focused window is still on an active tag.
         let keep = focused
             .and_then(|fid| self.find_window(fid))
-            .map(|w| (active >> w.tag) & 1 == 1)
+            .map(|w| w.output == output_idx && (active >> w.tag) & 1 == 1)
             .unwrap_or(false);
 
         let new_focused = if keep {
@@ -237,7 +266,7 @@ impl State {
             // Pick the first window on an active tag.
             self.windows
                 .iter()
-                .find(|w| (active >> w.tag) & 1 == 1)
+                .find(|w| w.output == output_idx && (active >> w.tag) & 1 == 1)
                 .map(|w| w.id)
         };
 
@@ -246,5 +275,24 @@ impl State {
             o.active_mask = active;
             o.focused_window = new_focused;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_active_tag_uses_lowest_set_bit() {
+        assert_eq!(first_active_tag_in_mask(0), 0);
+        assert_eq!(first_active_tag_in_mask(1), 0);
+        assert_eq!(first_active_tag_in_mask(1 << 4), 4);
+        assert_eq!(first_active_tag_in_mask((1 << 7) | (1 << 2)), 2);
+    }
+
+    #[test]
+    fn first_active_tag_ignores_bits_above_tag_range() {
+        assert_eq!(first_active_tag_in_mask(1 << 20), 0);
+        assert_eq!(first_active_tag_in_mask((1 << 20) | (1 << 9)), 9);
     }
 }
