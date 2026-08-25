@@ -9,6 +9,7 @@ use crate::protocols::wm::river_window_manager_v1::RiverWindowManagerV1;
 /// Handle a manage sequence: recompute focus/occupancy, then propose
 /// dimensions for every visible (non-floating) window.
 pub fn on_manage_start(data: &mut AppData, wm: &RiverWindowManagerV1) {
+    let started = std::time::Instant::now();
     log::trace!("manage_start");
 
     // Process queued interactive pointer operations (op_start_pointer /
@@ -117,26 +118,38 @@ pub fn on_manage_start(data: &mut AppData, wm: &RiverWindowManagerV1) {
     };
 
     {
-        let state = data.state.borrow();
+        let mut state = data.state.borrow_mut();
+        let mut proposed = 0usize;
         for (wid, geom) in geometries {
             if geom.width == 0 || geom.height == 0 {
                 continue;
             }
-            if let Some(window) = state.find_window(wid) {
+            if let Some(window) = state.find_window_mut(wid) {
+                if window.proposed_dimensions == Some((geom.width, geom.height)) {
+                    continue;
+                }
                 window
                     .proxy
                     .propose_dimensions(geom.width as i32, geom.height as i32);
+                window.proposed_dimensions = Some((geom.width, geom.height));
+                proposed += 1;
             }
         }
         // Propose dimensions for floating windows (their float_w/float_h, set
         // by interactive resize).
-        for window in state.windows.iter().filter(|w| w.floating) {
+        for window in state.windows.iter_mut().filter(|w| w.floating) {
             if window.float_w > 0 && window.float_h > 0 {
+                if window.proposed_dimensions == Some((window.float_w, window.float_h)) {
+                    continue;
+                }
                 window
                     .proxy
                     .propose_dimensions(window.float_w as i32, window.float_h as i32);
+                window.proposed_dimensions = Some((window.float_w, window.float_h));
+                proposed += 1;
             }
         }
+        log::debug!("manage proposed {proposed} window dimensions");
     }
 
     // Enable keybindings that were created before this manage sequence.
@@ -174,23 +187,36 @@ pub fn on_manage_start(data: &mut AppData, wm: &RiverWindowManagerV1) {
     }
 
     wm.manage_finish();
+    log::debug!("manage_start finished in {:?}", started.elapsed());
 }
 
 /// Handle a render sequence: ensure nodes exist, position windows, set
 /// borders, and hide/show.
 pub fn on_render_start(data: &mut AppData, wm: &RiverWindowManagerV1) {
+    let started = std::time::Instant::now();
     log::trace!("render_start");
 
-    // Ensure every window has its render node (get_node, once).
+    // Ensure visible windows have their render node (get_node, once).
     {
         let mut state = data.state.borrow_mut();
         let qh = data.qh.clone().expect("qh not set");
-        for window in state.windows.iter_mut() {
+        let visible: Vec<bool> = state
+            .windows
+            .iter()
+            .map(|window| state.window_is_visible(window))
+            .collect();
+        let mut requested = 0usize;
+        for (window, visible) in state.windows.iter_mut().zip(visible) {
             if window.node.is_none() {
+                if !visible {
+                    continue;
+                }
                 let node = window.proxy.get_node(&qh, ());
                 window.node = Some(node);
+                requested += 1;
             }
         }
+        log::debug!("render requested {requested} window nodes");
     }
 
     layout::render_all_run(data);
@@ -199,4 +225,5 @@ pub fn on_render_start(data: &mut AppData, wm: &RiverWindowManagerV1) {
 
     // Refresh the status snapshot for the socket server.
     crate::status::refresh_snapshot(data);
+    log::debug!("render_start finished in {:?}", started.elapsed());
 }

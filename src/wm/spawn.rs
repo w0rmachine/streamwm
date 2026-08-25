@@ -5,16 +5,15 @@ use std::process::{Command, Stdio};
 
 /// Spawn a shell command detached from streamwm.
 pub fn spawn(command: &str) {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
     log::info!("spawn: {command}");
-    match Command::new(shell)
-        .arg("-c")
-        .arg(command)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    {
+    let started = if let Some(args) = direct_command_args(command) {
+        spawn_command(args)
+    } else {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+        spawn_command(vec![shell, "-c".to_string(), command.to_string()])
+    };
+
+    match started {
         Ok(mut child) => {
             // Reap the child in a background thread so it doesn't linger as a
             // zombie; streamwm stays responsive while the command runs.
@@ -26,6 +25,64 @@ pub fn spawn(command: &str) {
     }
 }
 
+fn spawn_command(args: Vec<String>) -> std::io::Result<std::process::Child> {
+    let Some((program, rest)) = args.split_first() else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "empty command",
+        ));
+    };
+
+    Command::new(program)
+        .args(rest)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+}
+
+fn direct_command_args(command: &str) -> Option<Vec<String>> {
+    let trimmed = command.trim();
+    if trimmed.is_empty() || trimmed.bytes().any(shell_syntax_byte) {
+        return None;
+    }
+
+    Some(
+        trimmed
+            .split_ascii_whitespace()
+            .map(ToString::to_string)
+            .collect(),
+    )
+}
+
+fn shell_syntax_byte(byte: u8) -> bool {
+    matches!(
+        byte,
+        b'\''
+            | b'"'
+            | b'\\'
+            | b'|'
+            | b'&'
+            | b';'
+            | b'<'
+            | b'>'
+            | b'('
+            | b')'
+            | b'$'
+            | b'`'
+            | b'*'
+            | b'?'
+            | b'~'
+            | b'{'
+            | b'}'
+            | b'['
+            | b']'
+            | b'='
+            | b'\n'
+            | b'\r'
+    )
+}
+
 /// Spawn the configured terminal.
 pub fn terminal(terminal: &str) {
     spawn(terminal);
@@ -34,4 +91,28 @@ pub fn terminal(terminal: &str) {
 /// Spawn the configured launcher.
 pub fn launcher(command: &str) {
     spawn(command);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn simple_command_can_spawn_directly() {
+        assert_eq!(
+            direct_command_args("alacritty"),
+            Some(vec!["alacritty".into()])
+        );
+        assert_eq!(
+            direct_command_args("alacritty --class term"),
+            Some(vec!["alacritty".into(), "--class".into(), "term".into()])
+        );
+    }
+
+    #[test]
+    fn shell_syntax_uses_shell() {
+        assert_eq!(direct_command_args("alacritty -e 'nvim notes.md'"), None);
+        assert_eq!(direct_command_args("notify-send hi && alacritty"), None);
+        assert_eq!(direct_command_args("FOO=bar alacritty"), None);
+    }
 }

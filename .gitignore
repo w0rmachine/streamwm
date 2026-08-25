@@ -23,3 +23,6 @@ target
 # Nix build outputs
 result
 result-*
+
+.serena
+.ai

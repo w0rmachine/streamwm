@@ -235,14 +235,18 @@ pub fn render_all_run(data: &mut AppData) {
         } else {
             (border_r, border_g, border_b)
         };
-        let edges = crate::protocols::wm::river_window_v1::Edges::Top
-            | crate::protocols::wm::river_window_v1::Edges::Bottom
-            | crate::protocols::wm::river_window_v1::Edges::Left
-            | crate::protocols::wm::river_window_v1::Edges::Right;
-        let (a, r32, g32, b32) = to_32bit(r, g, b);
-        window
-            .proxy
-            .set_borders(edges, config.border_width as i32, r32, g32, b32, a);
+        let border_state = (is_focused, config.border_width, r, g, b);
+        if window.border_applied != Some(border_state) {
+            let edges = crate::protocols::wm::river_window_v1::Edges::Top
+                | crate::protocols::wm::river_window_v1::Edges::Bottom
+                | crate::protocols::wm::river_window_v1::Edges::Left
+                | crate::protocols::wm::river_window_v1::Edges::Right;
+            let (a, r32, g32, b32) = to_32bit(r, g, b);
+            window
+                .proxy
+                .set_borders(edges, config.border_width as i32, r32, g32, b32, a);
+            window.border_applied = Some(border_state);
+        }
         window.proxy.show();
     }
 }

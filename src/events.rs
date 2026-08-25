@@ -91,6 +91,7 @@ impl Dispatch<RiverOutputV1, ()> for AppData {
         let Some(idx) = state.outputs.iter().position(|o| o.proxy.id() == oid) else {
             return;
         };
+        let mut changed = false;
         match event {
             OutputEvent::Position { x, y } => {
                 state.outputs[idx].x = x;
@@ -99,6 +100,8 @@ impl Dispatch<RiverOutputV1, ()> for AppData {
                     state.outputs[idx].usable_x = x;
                     state.outputs[idx].usable_y = y;
                 }
+                state.repair_outputs();
+                changed = true;
             }
             OutputEvent::Dimensions { width, height } => {
                 state.outputs[idx].width = width as u32;
@@ -107,6 +110,8 @@ impl Dispatch<RiverOutputV1, ()> for AppData {
                     state.outputs[idx].usable_width = width as u32;
                     state.outputs[idx].usable_height = height as u32;
                 }
+                state.repair_outputs();
+                changed = true;
             }
             OutputEvent::WlOutput { name } => {
                 state.outputs[idx].wl_global = Some(name);
@@ -119,7 +124,13 @@ impl Dispatch<RiverOutputV1, ()> for AppData {
                 // Migrate this output's tags to the first remaining output and
                 // recompute focus.
                 state.remove_output(idx);
+                data.layer_default_set = false;
+                changed = true;
             }
+        }
+        drop(state);
+        if changed {
+            request_manage(data);
         }
     }
 }
@@ -153,6 +164,9 @@ impl Dispatch<RiverLayerShellOutputV1, ()> for AppData {
         output.usable_y = y;
         output.usable_width = width.max(0) as u32;
         output.usable_height = height.max(0) as u32;
+        state.repair_outputs();
+        drop(state);
+        request_manage(data);
     }
 }
 
@@ -277,5 +291,11 @@ impl Dispatch<WlOutput, u32> for AppData {
                 output.name = Some(name);
             }
         }
+    }
+}
+
+fn request_manage(data: &AppData) {
+    if let Some(wm) = &data.wm {
+        wm.manage_dirty();
     }
 }

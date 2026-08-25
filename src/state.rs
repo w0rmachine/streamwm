@@ -61,6 +61,10 @@ pub struct Window {
     pub fullscreen_applied: bool,
     /// Last decoration mode sent to river (`true` = SSD, `false` = CSD).
     pub ssd_applied: Option<bool>,
+    /// Last content size proposed to river.
+    pub proposed_dimensions: Option<(u32, u32)>,
+    /// Last border state sent to river: (focused, width, r, g, b).
+    pub border_applied: Option<(bool, u32, u8, u8, u8)>,
     /// Render node (obtained once via get_node).
     pub node: Option<crate::protocols::wm::river_node_v1::RiverNodeV1>,
 }
@@ -83,6 +87,8 @@ impl Window {
             fullscreen: false,
             fullscreen_applied: false,
             ssd_applied: None,
+            proposed_dimensions: None,
+            border_applied: None,
             node: None,
         }
     }
@@ -294,6 +300,7 @@ impl State {
                 o.active_tag = tag;
             }
         }
+        self.normalize_outputs();
     }
 
     /// Remove an output and migrate its tags to the first remaining output.
@@ -313,6 +320,102 @@ impl State {
             self.focused_output = if remaining == 0 { None } else { Some(0) };
         } else if self.focused_output.is_some_and(|f| f > idx) {
             self.focused_output = self.focused_output.map(|f| f - 1);
+        }
+        self.normalize_outputs();
+        self.clamp_floating_windows();
+    }
+
+    /// Revalidate active tags, focus, and floating positions after output
+    /// geometry or ownership changes.
+    pub fn repair_outputs(&mut self) {
+        self.normalize_outputs();
+        self.clamp_floating_windows();
+    }
+
+    fn normalize_outputs(&mut self) {
+        if self.outputs.is_empty() {
+            self.focused_output = None;
+            return;
+        }
+
+        if self
+            .focused_output
+            .is_none_or(|focused| focused >= self.outputs.len())
+        {
+            self.focused_output = Some(0);
+        }
+
+        for output_idx in 0..self.outputs.len() {
+            if self.tag_owner(self.outputs[output_idx].active_tag) != Some(output_idx) {
+                if let Some(tag) = self.best_tag_for_output(output_idx) {
+                    self.outputs[output_idx].active_tag = tag;
+                } else if let Some(tag) = self.tags.iter().position(|t| t.output.is_none()) {
+                    self.tags[tag].output = Some(output_idx);
+                    self.outputs[output_idx].active_tag = tag;
+                }
+            }
+            self.refocus_output(output_idx);
+        }
+    }
+
+    fn best_tag_for_output(&self, output_idx: usize) -> Option<usize> {
+        let owners: Vec<Option<usize>> = self.tags.iter().map(|tag| tag.output).collect();
+        let occupied: Vec<usize> = self.windows.iter().map(|window| window.tag).collect();
+        choose_active_tag(
+            &owners,
+            self.outputs[output_idx].active_tag,
+            output_idx,
+            &occupied,
+        )
+    }
+
+    pub fn clamp_floating_windows(&mut self) {
+        if self.outputs.is_empty() {
+            return;
+        }
+
+        let output_areas: Vec<(i32, i32, u32, u32)> = self
+            .outputs
+            .iter()
+            .map(|output| {
+                if output.usable_width > 0 || output.usable_height > 0 {
+                    (
+                        output.usable_x,
+                        output.usable_y,
+                        output.usable_width,
+                        output.usable_height,
+                    )
+                } else {
+                    (output.x, output.y, output.width, output.height)
+                }
+            })
+            .collect();
+        let owners: Vec<Option<usize>> =
+            self.windows.iter().map(|w| self.tag_owner(w.tag)).collect();
+
+        for (window, owner) in self.windows.iter_mut().zip(owners) {
+            if !window.floating {
+                continue;
+            }
+            let output_idx = owner.unwrap_or_else(|| self.focused_output.unwrap_or(0));
+            let Some((x, y, width, height)) = output_areas.get(output_idx).copied() else {
+                continue;
+            };
+            if width == 0 || height == 0 {
+                continue;
+            }
+            let (fx, fy) = clamp_rect_to_area(
+                window.float_x,
+                window.float_y,
+                window.float_w,
+                window.float_h,
+                x,
+                y,
+                width,
+                height,
+            );
+            window.float_x = fx;
+            window.float_y = fy;
         }
     }
 
@@ -407,6 +510,45 @@ impl State {
     }
 }
 
+fn clamp_rect_to_area(
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    area_x: i32,
+    area_y: i32,
+    area_width: u32,
+    area_height: u32,
+) -> (i32, i32) {
+    if area_width == 0 || area_height == 0 {
+        return (area_x, area_y);
+    }
+
+    let max_x = area_x + area_width.saturating_sub(width.min(area_width)) as i32;
+    let max_y = area_y + area_height.saturating_sub(height.min(area_height)) as i32;
+    (x.clamp(area_x, max_x), y.clamp(area_y, max_y))
+}
+
+fn choose_active_tag(
+    owners: &[Option<usize>],
+    current: usize,
+    output_idx: usize,
+    occupied_tags: &[usize],
+) -> Option<usize> {
+    if owners.get(current).copied().flatten() == Some(output_idx) {
+        return Some(current);
+    }
+
+    owners
+        .iter()
+        .enumerate()
+        .find(|(tag, owner)| {
+            **owner == Some(output_idx) && occupied_tags.iter().any(|window_tag| window_tag == tag)
+        })
+        .map(|(tag, _)| tag)
+        .or_else(|| owners.iter().position(|owner| *owner == Some(output_idx)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -450,5 +592,33 @@ mod tests {
         assert_eq!(state.master_fraction(2), 0.9);
         state.set_master_fraction(2, -1.0);
         assert_eq!(state.master_fraction(2), 0.1);
+    }
+
+    #[test]
+    fn normalize_active_tags_prefers_owned_occupied_tags() {
+        let mut owners = vec![Some(0), Some(0), Some(1), None];
+        assert_eq!(choose_active_tag(&owners, 2, 0, &[1]), Some(1));
+        assert_eq!(choose_active_tag(&owners, 0, 1, &[1]), Some(2));
+
+        owners[3] = Some(1);
+        assert_eq!(choose_active_tag(&owners, 0, 1, &[]), Some(2));
+    }
+
+    #[test]
+    fn clamp_rect_keeps_floating_window_inside_output_area() {
+        assert_eq!(
+            clamp_rect_to_area(2500, -200, 400, 300, 100, 50, 900, 700),
+            (600, 50)
+        );
+        assert_eq!(
+            clamp_rect_to_area(-20, 900, 1200, 800, 100, 50, 900, 700),
+            (100, 50)
+        );
+    }
+
+    #[test]
+    fn choose_active_tag_keeps_valid_current_tag() {
+        let owners = vec![Some(0), Some(0), Some(1)];
+        assert_eq!(choose_active_tag(&owners, 1, 0, &[0]), Some(1));
     }
 }
