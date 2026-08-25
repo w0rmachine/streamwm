@@ -93,6 +93,13 @@ pub struct Lid {
     /// kanshi profile to switch to on lid open.
     #[serde(default = "default_lid_open_profile")]
     pub open_profile: String,
+    /// kanshi profile to switch to when the lid is open and only the laptop
+    /// panel is connected.
+    #[serde(default = "default_lid_undocked_profile")]
+    pub undocked_profile: String,
+    /// Internal panel output name used for recovery.
+    #[serde(default = "default_lid_internal_output")]
+    pub internal_output: String,
 }
 
 fn default_mod() -> String {
@@ -130,6 +137,12 @@ fn default_lid_close_profile() -> String {
 }
 fn default_lid_open_profile() -> String {
     "office".to_string()
+}
+fn default_lid_undocked_profile() -> String {
+    "undocked".to_string()
+}
+fn default_lid_internal_output() -> String {
+    "eDP-1".to_string()
 }
 
 impl Config {
@@ -290,5 +303,28 @@ open_profile = "open"
         assert!(c.lid.enable);
         assert_eq!(c.lid.close_profile, "closed");
         assert_eq!(c.lid.open_profile, "open");
+        assert_eq!(c.lid.undocked_profile, "undocked");
+        assert_eq!(c.lid.internal_output, "eDP-1");
+    }
+
+    #[test]
+    fn parse_lid_recovery_config() {
+        let c: Config = toml::from_str(
+            r#"
+[lid]
+enable = true
+close_profile = "office_clamshell"
+open_profile = "office"
+undocked_profile = "mobile"
+internal_output = "eDP-2"
+"#,
+        )
+        .unwrap();
+
+        assert!(c.lid.enable);
+        assert_eq!(c.lid.close_profile, "office_clamshell");
+        assert_eq!(c.lid.open_profile, "office");
+        assert_eq!(c.lid.undocked_profile, "mobile");
+        assert_eq!(c.lid.internal_output, "eDP-2");
     }
 }
