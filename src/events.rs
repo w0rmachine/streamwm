@@ -1,5 +1,9 @@
-//! Dispatch implementations for river window/output/seat events, updating the
-//! data model (titles, app ids, dimensions, output geometry, focus).
+//! Event dispatch implementations for River protocol interfaces:
+//! - `RiverWindowV1`: Closed, AppId, Title, Dimensions
+//! - `RiverOutputV1`: Position, Dimensions, WlOutput binding, Removed
+//! - `RiverLayerShellOutputV1`: NonExclusiveArea
+//! - `RiverSeatV1`: PointerEnter, PointerLeave, PointerPosition, WindowInteraction, OpDelta, OpRelease, Removed
+//! - `WlOutput`: Name
 
 use wayland_client::{
     protocol::wl_output::{Event as WlOutputEvent, WlOutput},
@@ -14,6 +18,7 @@ use crate::protocols::wm::river_output_v1::{Event as OutputEvent, RiverOutputV1}
 use crate::protocols::wm::river_seat_v1::{Event as SeatEvent, RiverSeatV1};
 use crate::protocols::wm::river_window_v1::{Event as WindowEvent, RiverWindowV1};
 
+/// Dispatch implementation for window events dispatched by `RiverWindowV1`.
 impl Dispatch<RiverWindowV1, ()> for AppData {
     fn event(
         data: &mut Self,
@@ -77,6 +82,7 @@ impl Dispatch<RiverWindowV1, ()> for AppData {
     }
 }
 
+/// Dispatch implementation for physical output events dispatched by `RiverOutputV1`.
 impl Dispatch<RiverOutputV1, ()> for AppData {
     fn event(
         data: &mut Self,
@@ -135,6 +141,7 @@ impl Dispatch<RiverOutputV1, ()> for AppData {
     }
 }
 
+/// Dispatch implementation for Layer-Shell surface exclusive area updates.
 impl Dispatch<RiverLayerShellOutputV1, ()> for AppData {
     fn event(
         data: &mut Self,
@@ -170,6 +177,7 @@ impl Dispatch<RiverLayerShellOutputV1, ()> for AppData {
     }
 }
 
+/// Dispatch implementation for input seat events (pointer entry, move, button clicks).
 impl Dispatch<RiverSeatV1, ()> for AppData {
     fn event(
         data: &mut Self,
@@ -197,6 +205,8 @@ impl Dispatch<RiverSeatV1, ()> for AppData {
         }
 
         let mut state = data.state.borrow_mut();
+        let mut output_focus_changed = false;
+
         match event {
             SeatEvent::PointerEnter { window } => {
                 if let Some(wid) = state.find_window_by_proxy(&window) {
@@ -252,22 +262,30 @@ impl Dispatch<RiverSeatV1, ()> for AppData {
                 // windows can never gain focus (and newly spawned windows are
                 // stuck on the first output).
                 if data.config.focus_follows_mouse {
-                    state.focused_output = state
-                        .outputs
-                        .iter()
-                        .position(|o| {
-                            x >= o.x
-                                && x < o.x + o.width as i32
-                                && y >= o.y
-                                && y < o.y + o.height as i32
-                        })
-                        .or(state.focused_output);
+                    let prev = state.focused_output;
+                    let target = state.outputs.iter().position(|o| {
+                        x >= o.x
+                            && x < o.x + o.width as i32
+                            && y >= o.y
+                            && y < o.y + o.height as i32
+                    });
+                    if let Some(new_out) = target {
+                        if prev != Some(new_out) {
+                            state.focused_output = Some(new_out);
+                            output_focus_changed = true;
+                        }
+                    }
                 }
             }
             SeatEvent::Removed => {
                 state.seats.retain(|s| s.proxy.id() != sid);
             }
             _ => {}
+        }
+
+        drop(state);
+        if output_focus_changed {
+            request_manage(data);
         }
     }
 }

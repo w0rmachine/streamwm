@@ -1,4 +1,7 @@
-//! Wayland connection and the river window-management event loop.
+//! Wayland client connection establishment and main event loop management.
+//!
+//! Handles `wayland-client` event queue initialization, global interface binding,
+//! file descriptor multiplexing via `nix::poll`, IPC wake socket draining, and lifecycle state management.
 
 use std::cell::RefCell;
 use std::io::Read;
@@ -24,74 +27,83 @@ use crate::protocols::wm::{
 use crate::protocols::xkb_bindings::river_xkb_bindings_v1::RiverXkbBindingsV1;
 use crate::state::{Output, Seat, State, Window};
 
-/// Dispatch user-data. Single-threaded; owns a shared handle to the data model.
+/// Application dispatch context and state container for the single-threaded event loop.
 pub struct AppData {
-    /// The window manager data model.
+    /// Interior-mutable window manager state model.
     pub state: Rc<RefCell<State>>,
-    /// Bound river_window_manager_v1.
+    /// Bound `river_window_manager_v1` global proxy.
     pub wm: Option<RiverWindowManagerV1>,
-    /// Bound river_xkb_bindings_v1.
+    /// Bound `river_xkb_bindings_v1` global proxy for keybindings.
     pub xkb: Option<RiverXkbBindingsV1>,
-    /// Bound river_layer_shell_v1 (signals layer-shell support to the compositor).
+    /// Bound `river_layer_shell_v1` global proxy signaling layer shell compatibility.
     pub layer_shell: Option<RiverLayerShellV1>,
-    /// Loaded configuration.
+    /// Active runtime configuration reference.
     pub config: Rc<Config>,
-    /// Set to true to break the event loop.
+    /// Flag signaling main loop termination when true.
     pub quit: bool,
-    /// Queue handle, set once after registry init.
+    /// Wayland queue handle used for instantiating new protocol objects.
     pub qh: Option<QueueHandle<AppData>>,
-    /// Wayland registry, kept so river_output_v1.wl_output names can be bound.
+    /// Wayland global registry handle.
     pub registry: Option<wl_registry::WlRegistry>,
-    /// Active keybindings: (binding proxy, action).
+    /// Active registered keybinding proxies mapped to their action strings.
     pub bindings: Vec<(
         crate::protocols::xkb_bindings::river_xkb_binding_v1::RiverXkbBindingV1,
         String,
     )>,
-    /// Whether the default layer-shell output has been set yet.
+    /// Track whether `river_layer_shell_v1.set_default` has been invoked.
     pub layer_default_set: bool,
-    /// Windows queued to be closed at the start of the next manage sequence.
+    /// List of window IDs queued for protocol close requests in the next manage sequence.
     pub pending_close: Vec<u32>,
-    /// Status snapshot, updated after render, read by the socket thread.
+    /// Shared thread-safe state snapshot accessed by the JSON socket server.
     pub snapshot: Option<std::sync::Arc<std::sync::Mutex<crate::status::StatusSnapshot>>>,
-    /// Active pointer bindings: (binding proxy, action "move"/"resize").
+    /// Active registered pointer binding proxies mapped to `"move"` or `"resize"`.
     pub pointer_bindings: Vec<(
         crate::protocols::wm::river_pointer_binding_v1::RiverPointerBindingV1,
         String,
     )>,
-    /// Active interactive pointer operation (floating move/resize), if any.
+    /// Currently active interactive pointer operation (moving or resizing a floating window).
     pub pointer_op: Option<PointerOp>,
-    /// A pointer operation queued to start at the next manage sequence.
+    /// Interactive pointer operation queued to start during the next manage sequence.
     pub pending_op: Option<PointerOp>,
-    /// Whether an op_end is queued for the next manage sequence.
+    /// Flag indicating an interactive pointer operation end (`op_end`) should be sent.
     pub op_end_requested: bool,
-    /// Output index to warp the pointer to at the next manage sequence, when
-    /// focus moved to a different output via keyboard (tag/output switch).
+    /// Target output index for pointer warping following keyboard output/tag switches.
     pub pending_pointer_warp: Option<usize>,
 }
 
-/// An in-progress interactive pointer operation for a floating window.
+/// State of an active interactive pointer operation (drag-to-move or drag-to-resize) for a floating window.
 pub struct PointerOp {
+    /// Window ID being manipulated.
     pub window: u32,
+    /// Type of pointer operation (Move or Resize).
     pub kind: OpKind,
-    /// Starting cursor position (logical px) at op start.
+    /// Initial pointer X position (logical pixels) when operation started.
     pub start_x: i32,
+    /// Initial pointer Y position (logical pixels) when operation started.
     pub start_y: i32,
-    /// Starting floating geometry.
+    /// Window float X coordinate at operation start.
     pub start_float_x: i32,
+    /// Window float Y coordinate at operation start.
     pub start_float_y: i32,
+    /// Window float width at operation start.
     pub start_w: u32,
+    /// Window float height at operation start.
     pub start_h: u32,
-    /// The seat driving this op, to send op_end on release.
+    /// Wayland seat proxy controlling the operation.
     pub seat: crate::protocols::wm::river_seat_v1::RiverSeatV1,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// Type of interactive pointer manipulation.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum OpKind {
+    /// Translating window floating position.
     Move,
+    /// Adjusting window floating dimensions.
     Resize,
 }
 
 impl AppData {
+    /// Constructs a new `AppData` state context with default empty handles.
     pub fn new(state: Rc<RefCell<State>>, config: Rc<Config>) -> AppData {
         AppData {
             state,
@@ -115,6 +127,8 @@ impl AppData {
     }
 }
 
+/// Connects to the Wayland display socket, initializes River protocol globals, starts the socket server,
+/// and executes the primary event dispatch loop using `nix::poll`.
 pub fn run(config: &Config) -> Result<(), String> {
     let conn = wayland_client::Connection::connect_to_env().map_err(|e| format!("connect: {e}"))?;
     let state = Rc::new(RefCell::new(State::new(
@@ -136,6 +150,9 @@ pub fn run(config: &Config) -> Result<(), String> {
     wake_reader
         .set_nonblocking(true)
         .map_err(|e| format!("status wake socket nonblocking: {e}"))?;
+    wake_writer
+        .set_nonblocking(true)
+        .map_err(|e| format!("status wake writer nonblocking: {e}"))?;
     let (command_rx, snapshot) = crate::status::start(wake_writer);
     data.snapshot = Some(snapshot);
 
@@ -368,3 +385,18 @@ delegate_noop!(AppData: ignore WlSeat);
 delegate_noop!(AppData: ignore WlSurface);
 delegate_noop!(AppData: ignore crate::protocols::layer_shell::river_layer_shell_v1::RiverLayerShellV1);
 delegate_noop!(AppData: ignore crate::protocols::layer_shell::river_layer_shell_seat_v1::RiverLayerShellSeatV1);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wake_socket_is_non_blocking() {
+        let (mut reader, writer) = UnixStream::pair().unwrap();
+        reader.set_nonblocking(true).unwrap();
+        writer.set_nonblocking(true).unwrap();
+
+        let mut buf = [0u8; 1];
+        assert!(reader.read(&mut buf).is_err());
+    }
+}

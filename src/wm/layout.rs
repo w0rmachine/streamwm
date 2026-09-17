@@ -1,21 +1,30 @@
-//! Tiling layout computation and window positioning.
+//! Master-Stack tiling layout calculation and window rendering operations.
+//!
+//! Calculates precise window geometry boundaries for tiled surfaces based on:
+//! - Active tag master width fraction (`0.1..=0.9`).
+//! - Configured window gap spacing (`gap`).
+//! - Screen usable area (accounting for layer-shell panels).
+//! - Floating window overlay z-ordering (tiled windows rendered first, floating windows rendered on top).
 
 use crate::config::Config;
 use crate::connection::AppData;
 use crate::state::State;
 
-/// A window geometry in logical pixels (global coordinates).
+/// Window rectangular geometry represented in global screen coordinates (logical pixels).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Geometry {
+    /// X coordinate origin.
     pub x: i32,
+    /// Y coordinate origin.
     pub y: i32,
+    /// Logical pixel width.
     pub width: u32,
+    /// Logical pixel height.
     pub height: u32,
 }
 
-/// Compute geometry for every visible window across all outputs.
-/// Returns (window_id, geometry) — floating windows are excluded (they are
-/// positioned independently).
+/// Computes tiling layout geometry for every visible non-floating window across all active outputs.
+/// Returns a vector of `(streamwm_window_id, Geometry)` tuples.
 pub fn compute_all(state: &State, config: &Config) -> Vec<(u32, Geometry)> {
     let mut out = Vec::new();
     for (idx, _output) in state.outputs.iter().enumerate() {
@@ -195,28 +204,17 @@ pub fn render_all_run(data: &mut AppData) {
         }
     }
 
-    // Order: tiled windows first, then floating windows on top.
-    let mut order: Vec<u32> = decisions
-        .iter()
-        .filter(|(_, visible, geom)| *visible && geom.is_some())
-        .map(|(wid, _, _)| *wid)
-        .collect();
-    order.extend(
-        decisions
-            .iter()
-            .filter(|(_, visible, geom)| *visible && geom.is_none())
-            .map(|(wid, _, _)| *wid),
-    );
+    // Partition visible decisions into tiled and floating sets so tiled windows are rendered
+    // first and floating windows end up on top (O(W) time complexity).
+    let (tiled_decisions, float_decisions): (Vec<_>, Vec<_>) = decisions
+        .into_iter()
+        .filter(|(_, visible, _)| *visible)
+        .partition(|(_, _, geom)| geom.is_some());
 
-    for wid in order {
+    for (wid, _visible, geom) in tiled_decisions.into_iter().chain(float_decisions.into_iter()) {
         let Some(window) = state.find_window_mut(wid) else {
             continue;
         };
-        let geom = decisions
-            .iter()
-            .find(|(dwid, _, _)| *dwid == wid)
-            .map(|(_, _, g)| *g)
-            .unwrap_or(None);
         let is_focused = focused == Some(wid);
 
         // Position via the render node.
@@ -339,5 +337,27 @@ mod tests {
             to_32bit(0, 127, 255),
             (0xFFFF_FFFF, 0, 0x7F7F_7F7F, 0xFFFF_FFFF)
         );
+    }
+
+    #[test]
+    fn tiled_and_floating_render_ordering_is_single_pass() {
+        let decisions = vec![
+            (1u32, true, Some(Geometry { x: 0, y: 0, width: 100, height: 100 })),
+            (2u32, true, None),
+            (3u32, true, Some(Geometry { x: 100, y: 0, width: 100, height: 100 })),
+        ];
+
+        let (tiled_decisions, float_decisions): (Vec<_>, Vec<_>) = decisions
+            .into_iter()
+            .filter(|(_, visible, _)| *visible)
+            .partition(|(_, _, geom)| geom.is_some());
+
+        let ordered_ids: Vec<u32> = tiled_decisions
+            .into_iter()
+            .chain(float_decisions.into_iter())
+            .map(|(wid, _, _)| wid)
+            .collect();
+
+        assert_eq!(ordered_ids, vec![1, 3, 2]);
     }
 }

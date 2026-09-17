@@ -1,19 +1,8 @@
-//! Status/control protocol over a Unix socket (JSON, newline-delimited).
+//! Unix domain IPC control and status socket server (`$XDG_RUNTIME_DIR/streamwm-<display>.sock`).
 //!
-//! streamwm is a Wayland *client* (river is the display server), so it cannot
-//! advertise Wayland globals of its own. Instead it exposes a small JSON
-//! protocol on `$XDG_RUNTIME_DIR/streamwm-<display>.sock`:
-//!
-//!   get_status                      -> JSON status snapshot (one line)
-//!   { "cmd": "focus_tag", "tag": N, "output": "eDP-1" }
-//!   { "cmd": "send_to_tag", "tag": N }
-//!   { "cmd": "focus_output", "output": "eDP-1" }
-//!   { "cmd": "spawn", "command": "..." }
-//!   { "cmd": "quit" }
-//!
-//! Each connection is request/response: the server writes one JSON line and
-//! closes. The socket thread owns a `StatusSnapshot` (built by the event loop)
-//! and a `mpsc::Sender<Command>` back to the event loop.
+//! Exposes a request/response line-delimited JSON interface allowing external tools, bar applications,
+//! and scripts to retrieve window manager status snapshots (`get_status`) and send control commands
+//! (`focus_tag`, `send_to_tag`, `focus_output`, `focus_window`, `spawn`, `quit`).
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -25,45 +14,61 @@ use serde::{Deserialize, Serialize};
 
 use crate::state::State;
 
-/// A serializable snapshot of the WM state, Send + Sync.
+/// Thread-safe status snapshot representation returned to JSON socket clients.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StatusSnapshot {
+    /// Name of the currently focused output (e.g. `"eDP-1"`).
     pub focused_output: Option<String>,
+    /// Snapshot data for each active display output.
     pub outputs: Vec<OutputSnap>,
 }
 
+/// Output snapshot containing tag masks and visible window list.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OutputSnap {
+    /// Output connector name (e.g. `"eDP-1"`).
     pub name: String,
+    /// True if this output currently holds seat keyboard focus.
     pub focused: bool,
-    /// Bitmask of the currently active (shown) tag.
+    /// Bitmask of the active (visible) tag on this output (e.g. `1 << tag_id`).
     pub active_mask: u32,
-    /// Bitmask of tags owned by this output (shown in the bar).
+    /// Bitmask of tags owned by this output.
     pub owned_mask: u32,
-    /// Bitmask of tags owned by this output that contain windows.
+    /// Bitmask of tags owned by this output that contain at least one window.
     pub occupied_mask: u32,
-    /// Bitmask of urgent tags.
+    /// Bitmask of tags with urgent windows.
     pub urgent_mask: u32,
+    /// Tag metadata list.
     pub tags: Vec<TagSnap>,
+    /// Window metadata list attached to tags owned by this output.
     pub windows: Vec<WindowSnap>,
+    /// Streamwm window ID of the focused window on this output, if any.
     pub focused_window: Option<u32>,
 }
 
+/// Individual tag snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TagSnap {
+    /// Tag index (`0..=8`).
     pub id: u32,
+    /// Optional tag display label.
     pub label: Option<String>,
 }
 
+/// Individual window snapshot for status reporting.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowSnap {
+    /// Streamwm window identifier.
     pub id: u32,
+    /// Application ID (e.g. `"alacritty"`).
     pub app_id: Option<String>,
+    /// Window title text.
     pub title: Option<String>,
+    /// Global tag index this window is on (`0..=8`).
     pub tag: u32,
 }
 
-/// A control command sent from the socket thread to the event loop.
+/// Control commands received over the JSON socket and sent to the main loop via `mpsc::channel`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     FocusTag(u32, Option<String>),
@@ -72,80 +77,78 @@ pub enum Command {
     FocusWindow(String, Option<String>),
     Spawn(String),
     Quit,
-    /// Notify the loop that a command arrived; it will `manage_dirty`.
+    /// Signal the main loop to perform a manage sequence.
     Refresh,
 }
 
-/// Build a status snapshot from the current state (pure data, no proxies).
+/// Constructs a pure data `StatusSnapshot` from current WM state.
 pub fn build_snapshot(state: &State, allow_spawn: bool) -> StatusSnapshot {
     let focused_output_idx = state.active_output();
     let mut snapshot = StatusSnapshot::default();
+    let num_outputs = state.outputs.len();
 
-    for (i, output) in state.outputs.iter().enumerate() {
-        let name = output.name.clone().unwrap_or_else(|| format!("output-{i}"));
+    // Pre-allocate output snapshots.
+    let mut output_snaps: Vec<OutputSnap> = (0..num_outputs)
+        .map(|i| {
+            let output = &state.outputs[i];
+            let name = output.name.clone().unwrap_or_else(|| format!("output-{i}"));
+            let is_focused = Some(i) == focused_output_idx;
+            if is_focused {
+                snapshot.focused_output = Some(name.clone());
+            }
 
-        if Some(i) == focused_output_idx {
-            snapshot.focused_output = Some(name.clone());
-        }
+            let active_mask = 1u32 << output.active_tag;
+            let tags = (0..crate::state::NUM_TAGS)
+                .map(|t| TagSnap {
+                    id: t as u32,
+                    label: state.tags.get(t).and_then(|tag| tag.label.clone()),
+                })
+                .collect();
 
-        // Owned/occupied/urgent masks are derived from the global tag table
-        // and the windows on those tags.
-        let mut owned_mask = 0u32;
-        let mut occupied_mask = 0u32;
-        let urgent_mask = 0u32;
-        for (t, tag) in state.tags.iter().enumerate() {
-            if tag.output == Some(i) {
-                owned_mask |= 1u32 << t;
+            OutputSnap {
+                name,
+                focused: is_focused,
+                active_mask,
+                owned_mask: 0,
+                occupied_mask: 0,
+                urgent_mask: 0,
+                tags,
+                windows: Vec::new(),
+                focused_window: output.focused_window,
+            }
+        })
+        .collect();
+
+    // Single pass to set owned masks for outputs.
+    for (t, tag) in state.tags.iter().enumerate() {
+        if let Some(owner) = tag.output {
+            if owner < num_outputs {
+                output_snaps[owner].owned_mask |= 1u32 << t;
             }
         }
-        for w in state.windows.iter() {
-            if state.tag_owner(w.tag) == Some(i) {
-                occupied_mask |= 1u32 << w.tag;
-            }
-        }
-
-        let active_mask = 1u32 << output.active_tag;
-
-        let tags = (0..crate::state::NUM_TAGS)
-            .map(|t| TagSnap {
-                id: t as u32,
-                label: state.tags.get(t).and_then(|tag| tag.label.clone()),
-            })
-            .collect();
-
-        let windows = state
-            .windows
-            .iter()
-            .filter(|w| state.tag_owner(w.tag) == Some(i))
-            .map(|w| WindowSnap {
-                id: w.id,
-                app_id: w.app_id.clone(),
-                title: w.title.clone(),
-                tag: w.tag as u32,
-            })
-            .collect();
-
-        snapshot.outputs.push(OutputSnap {
-            name,
-            focused: Some(i) == focused_output_idx,
-            active_mask,
-            owned_mask,
-            occupied_mask,
-            urgent_mask,
-            tags,
-            windows,
-            focused_window: output.focused_window,
-        });
     }
 
+    // Single pass over state.windows to populate occupied masks and window snapshots.
+    for w in state.windows.iter() {
+        if let Some(owner) = state.tag_owner(w.tag) {
+            if owner < num_outputs {
+                output_snaps[owner].occupied_mask |= 1u32 << w.tag;
+                output_snaps[owner].windows.push(WindowSnap {
+                    id: w.id,
+                    app_id: w.app_id.clone(),
+                    title: w.title.clone(),
+                    tag: w.tag as u32,
+                });
+            }
+        }
+    }
+
+    snapshot.outputs = output_snaps;
     let _ = allow_spawn;
     snapshot
 }
 
-/// Start the status/control socket server in a background thread.
-///
-/// Returns a `Receiver<Command>` the event loop must poll, plus the
-/// `Arc<Mutex<StatusSnapshot>>` the loop updates and the socket writes.
+/// Spawns the IPC socket thread listening on `$XDG_RUNTIME_DIR/streamwm-<display>.sock`.
 pub fn start(wake: UnixStream) -> (mpsc::Receiver<Command>, Arc<Mutex<StatusSnapshot>>) {
     let socket_path = socket_path();
     let snapshot = Arc::new(Mutex::new(StatusSnapshot::default()));
@@ -190,13 +193,21 @@ fn socket_path() -> std::path::PathBuf {
     std::path::PathBuf::from(runtime).join(format!("streamwm-{display}.sock"))
 }
 
+/// Client socket request handler (runs on a dedicated client thread).
 fn handle_client(
     stream: UnixStream,
     snapshot: Arc<Mutex<StatusSnapshot>>,
     tx: mpsc::Sender<Command>,
     mut wake: UnixStream,
 ) {
-    let reader = BufReader::new(stream.try_clone().unwrap_or_else(|_| unreachable!()));
+    // Hardening: set a read timeout (2s) so idle or malicious socket connections do not block indefinitely.
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+
+    let Ok(stream_read) = stream.try_clone() else {
+        log::warn!("failed to clone client socket stream");
+        return;
+    };
+    let reader = BufReader::new(stream_read);
     let mut writer = stream;
 
     // Request/response: read one line, write one response, then close so the
@@ -407,5 +418,25 @@ mod tests {
         );
         assert_eq!(parse_command_value(&json!({ "cmd": "focus_output" })), None);
         assert_eq!(parse_command_value(&json!({ "cmd": "unknown" })), None);
+    }
+
+    #[test]
+    fn build_snapshot_single_pass_occupied_mask() {
+        let mut state = State::new(0.55);
+        state.tags[0].output = Some(0);
+        state.tags[1].output = Some(0);
+
+        let snap = build_snapshot(&state, false);
+        assert_eq!(snap.outputs.len(), 0);
+    }
+
+    #[test]
+    fn socket_read_timeout_prevents_indefinite_blocking() {
+        let (s1, _s2) = UnixStream::pair().unwrap();
+        s1.set_read_timeout(Some(std::time::Duration::from_millis(50))).unwrap();
+        let mut reader = BufReader::new(s1);
+        let mut line = String::new();
+        let result = reader.read_line(&mut line);
+        assert!(result.is_err());
     }
 }

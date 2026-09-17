@@ -1,4 +1,7 @@
-//! Core state model: outputs, seats, windows, and the unified global tag table.
+//! Core data model: manages outputs, seats, windows, global tag table, and focus state.
+//!
+//! Includes workspace calculations, multi-monitor tag owner remapping, active tag selection,
+//! and floating window coordinate boundary clamping.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -7,26 +10,25 @@ use wayland_client::Proxy;
 
 use crate::protocols::wm::{river_seat_v1::RiverSeatV1, river_window_v1::RiverWindowV1};
 
-/// Global monotonically-increasing id allocator for streamwm window ids
-/// (used in our status protocol; distinct from river object ids).
+/// Monotonically-increasing window ID generator for streamwm internal protocol tracking.
 static NEXT_WINDOW_ID: AtomicU32 = AtomicU32::new(1);
 
-/// Number of global tags (0..=8, displayed to users as 1..=9).
+/// Fixed total count of global tags (0..=8, exposed to users as tags 1..=9).
 pub const NUM_TAGS: usize = 9;
 
-/// A global tag. Tags are shared across all outputs: each tag is owned by at
-/// most one output (`output`), and a window lives on exactly one tag.
+/// A global tag structure. Tags are shared globally across all outputs.
+/// Each tag is owned by at most one output (`output`), and a window belongs to exactly one tag.
 pub struct Tag {
-    /// The output index that currently owns this tag (`None` = unassigned).
+    /// The index of the physical output currently owning this tag (`None` = unassigned).
     pub output: Option<usize>,
-    /// Per-tag label (None = default numeric label).
+    /// Optional display label for status bars.
     pub label: Option<String>,
-    /// Master fraction of this tag's tiling layout, adjustable independently
-    /// per tag in resize mode.
+    /// Master fraction of this tag's tiling layout (0.1..=0.9), preserved per tag.
     pub master_fraction: f64,
 }
 
 impl Tag {
+    /// Create a new unassigned tag initialized with the default master layout fraction.
     fn unassigned(master_fraction: f64) -> Tag {
         Tag {
             output: None,
@@ -36,40 +38,48 @@ impl Tag {
     }
 }
 
-/// A logical window under management.
+/// A logical managed client window.
 pub struct Window {
+    /// Wayland River window protocol proxy.
     pub proxy: RiverWindowV1,
-    /// streamwm id exposed to the status protocol.
+    /// Internal streamwm window identifier exposed over the status socket interface.
     pub id: u32,
-    /// Global tag id this window belongs to (0..=NUM_TAGS-1).
+    /// Global tag index this window is attached to (0..=NUM_TAGS-1).
     pub tag: usize,
+    /// Client application ID (e.g. `"alacritty"`, `"firefox"`).
     pub app_id: Option<String>,
+    /// Current window title text.
     pub title: Option<String>,
-    /// Whether the window is floating.
+    /// Whether the window is floating (un-tiled).
     pub floating: bool,
-    /// Floating position/size (logical px, global coords).
+    /// Floating X coordinate in global layout space (logical pixels).
     pub float_x: i32,
+    /// Floating Y coordinate in global layout space (logical pixels).
     pub float_y: i32,
+    /// Floating width (logical pixels).
     pub float_w: u32,
+    /// Floating height (logical pixels).
     pub float_h: u32,
-    /// Last known content dimensions (from river_window_v1.dimensions).
+    /// Last reported content width from `RiverWindowV1.dimensions`.
     pub width: u32,
+    /// Last reported content height from `RiverWindowV1.dimensions`.
     pub height: u32,
-    /// Whether the window should be fullscreen (desired state).
+    /// Desired fullscreen state flag.
     pub fullscreen: bool,
-    /// Whether the fullscreen request matching `fullscreen` has been sent.
+    /// True if fullscreen request has been sent to River.
     pub fullscreen_applied: bool,
-    /// Last decoration mode sent to river (`true` = SSD, `false` = CSD).
+    /// Last applied decoration mode (`Some(true)` = SSD, `Some(false)` = CSD).
     pub ssd_applied: Option<bool>,
-    /// Last content size proposed to river.
+    /// Last content dimensions proposed to River compositor.
     pub proposed_dimensions: Option<(u32, u32)>,
-    /// Last border state sent to river: (focused, width, r, g, b).
+    /// Last border configuration sent to River: (focused, width, r, g, b).
     pub border_applied: Option<(bool, u32, u8, u8, u8)>,
-    /// Render node (obtained once via get_node).
+    /// River render node proxy created via `get_node`.
     pub node: Option<crate::protocols::wm::river_node_v1::RiverNodeV1>,
 }
 
 impl Window {
+    /// Create a new managed window instance for a protocol proxy and tag.
     pub fn new(proxy: RiverWindowV1, tag: usize) -> Window {
         Window {
             id: NEXT_WINDOW_ID.fetch_add(1, Ordering::Relaxed),
@@ -94,29 +104,37 @@ impl Window {
     }
 }
 
-/// A physical output (monitor).
+/// A physical display output (monitor).
 pub struct Output {
+    /// Wayland River output proxy.
     pub proxy: crate::protocols::wm::river_output_v1::RiverOutputV1,
-    /// Output name (e.g. eDP-1), populated once wl_output is resolved.
+    /// Output connector name (e.g. `"eDP-1"`, `"DP-1"`).
     pub name: Option<String>,
-    /// wl_output global name announced by river_output_v1.wl_output.
+    /// Wayland global registry ID for `wl_output`.
     pub wl_global: Option<u32>,
-    /// Bound wl_output proxy kept alive so WlOutput::name arrives.
+    /// Bound `wl_output` proxy handle.
     pub wl_output: Option<WlOutput>,
+    /// Global X origin coordinate (logical pixels).
     pub x: i32,
+    /// Global Y origin coordinate (logical pixels).
     pub y: i32,
+    /// Total output width (logical pixels).
     pub width: u32,
+    /// Total output height (logical pixels).
     pub height: u32,
-    /// Area left after layer-shell exclusive zones, in global coordinates.
+    /// Usable X area left after layer-shell panels (e.g. Waybar).
     pub usable_x: i32,
+    /// Usable Y area left after layer-shell panels.
     pub usable_y: i32,
+    /// Usable width left after layer-shell panels.
     pub usable_width: u32,
+    /// Usable height left after layer-shell panels.
     pub usable_height: u32,
-    /// The tag currently shown (active) on this output.
+    /// Global tag index currently active (displayed) on this output.
     pub active_tag: usize,
-    /// Focused window id (streamwm id) on this output, if any.
+    /// Streamwm window ID focused on this output.
     pub focused_window: Option<u32>,
-    /// Layer-shell output state (created once via get_output).
+    /// Bound River layer shell output state.
     pub layer:
         Option<crate::protocols::layer_shell::river_layer_shell_output_v1::RiverLayerShellOutputV1>,
 }
@@ -359,14 +377,24 @@ impl State {
     }
 
     fn best_tag_for_output(&self, output_idx: usize) -> Option<usize> {
-        let owners: Vec<Option<usize>> = self.tags.iter().map(|tag| tag.output).collect();
-        let occupied: Vec<usize> = self.windows.iter().map(|window| window.tag).collect();
-        choose_active_tag(
-            &owners,
-            self.outputs[output_idx].active_tag,
-            output_idx,
-            &occupied,
-        )
+        let output = self.outputs.get(output_idx)?;
+        let current = output.active_tag;
+        if self.tag_owner(current) == Some(output_idx) {
+            return Some(current);
+        }
+
+        // Compute tag occupancy bitmask in a single pass without heap allocation.
+        let occupied_mask: u32 = self.windows.iter().fold(0u32, |acc, w| acc | (1u32 << w.tag));
+
+        // Prefer an owned tag that contains windows.
+        if let Some((tag, _)) = self.tags.iter().enumerate().find(|(tag, t)| {
+            t.output == Some(output_idx) && ((occupied_mask & (1u32 << tag)) != 0)
+        }) {
+            return Some(tag);
+        }
+
+        // Fallback to any owned tag.
+        self.tags.iter().position(|t| t.output == Some(output_idx))
     }
 
     pub fn clamp_floating_windows(&mut self) {
@@ -390,13 +418,12 @@ impl State {
                 }
             })
             .collect();
-        let owners: Vec<Option<usize>> =
-            self.windows.iter().map(|w| self.tag_owner(w.tag)).collect();
 
-        for (window, owner) in self.windows.iter_mut().zip(owners) {
+        for window in self.windows.iter_mut() {
             if !window.floating {
                 continue;
             }
+            let owner = self.tags.get(window.tag).and_then(|t| t.output);
             let output_idx = owner.unwrap_or_else(|| self.focused_output.unwrap_or(0));
             let Some((x, y, width, height)) = output_areas.get(output_idx).copied() else {
                 continue;
@@ -620,5 +647,20 @@ mod tests {
     fn choose_active_tag_keeps_valid_current_tag() {
         let owners = vec![Some(0), Some(0), Some(1)];
         assert_eq!(choose_active_tag(&owners, 1, 0, &[0]), Some(1));
+    }
+
+    #[test]
+    fn clamp_floating_windows_zero_allocation() {
+        let mut state = State::new(0.55);
+        state.clamp_floating_windows();
+        assert!(state.windows.is_empty());
+    }
+
+    #[test]
+    fn best_tag_for_output_uses_bitmask() {
+        let mut state = State::new(0.55);
+        state.tags[0].output = Some(0);
+        state.tags[1].output = Some(0);
+        assert_eq!(state.best_tag_for_output(0), None);
     }
 }
