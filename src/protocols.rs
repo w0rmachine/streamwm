@@ -1,8 +1,12 @@
-//! Protocol bindings: generated from the river protocol XMLs, using the
-//! wayland-scanner proc macros.
+//! Wayland protocol bindings compiled from XML definitions using `wayland-scanner`.
+//!
+//! Submodules:
+//! - [`wm`]: `river-window-management-v1` (handles manage/render passes, node assignment, borders, focus).
+//! - [`xkb_bindings`]: `river-xkb-bindings-v1` (handles hotkey registration and event notifications).
+//! - [`layer_shell`]: `river-layer-shell-v1` (signals layer-shell support to River compositor).
 
 pub mod wm {
-    //! river-window-management-v1 (client side).
+    //! Client-side bindings for `river-window-management-v1`.
     use wayland_client;
     use wayland_client::protocol::*;
 
@@ -16,8 +20,7 @@ pub mod wm {
 }
 
 pub mod xkb_bindings {
-    //! river-xkb-bindings-v1 (client side). References river_seat_v1 and
-    //! wl_seat from river-window-management-v1 / core.
+    //! Client-side bindings for `river-xkb-bindings-v1`.
     #![allow(unused_imports)]
     use crate::protocols::wm::__interfaces::*;
     use crate::protocols::wm::*;
@@ -36,14 +39,13 @@ pub mod xkb_bindings {
 }
 
 pub mod layer_shell {
-    //! river-layer-shell-v1 (client side). Binding this global signals to the
-    //! compositor that the window manager supports wlr-layer-shell, allowing
-    //! clients (quickshell bar, swaybg background) to map layer surfaces.
+    //! Client-side bindings for `river-layer-shell-v1`.
+    //!
+    //! Binding this global interface informs River that `streamwm` supports `wlr-layer-shell`,
+    //! allowing external bars (Waybar, Quickshell) and background wallpapers (swaybg) to function.
     #![allow(unused_imports)]
     use wayland_client;
     use wayland_client::protocol::*;
-    // The generated client code references river_output_v1 / river_seat_v1 from
-    // river-window-management-v1; bring them into scope for the macro.
     #[allow(unused_imports)]
     use crate::protocols::wm::__interfaces::*;
     #[allow(unused_imports)]

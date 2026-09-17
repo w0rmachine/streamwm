@@ -50,6 +50,7 @@ pub fn spawn(config: Lid) {
     });
 }
 
+/// Polling event loop that tracks ACPI lid state transitions and DRM connector topology changes.
 fn run(config: &Lid) -> Result<(), Box<dyn std::error::Error>> {
     log::info!("lid listener: polling ACPI lid state");
 
@@ -133,7 +134,7 @@ fn recover_open_outputs(
     }
 }
 
-/// Re-enable the internal panel and switch to the undocked kanshi profile.
+/// Re-enable the internal panel via `wlr-randr` and switch to the undocked kanshi profile.
 fn recover_undocked(config: &Lid) -> Result<(), Box<dyn std::error::Error>> {
     log::info!(
         "lid/output recovery: internal={} connected, no external outputs; switching kanshi to `{}`",
@@ -149,13 +150,14 @@ fn recover_undocked(config: &Lid) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Switch kanshi to a named profile.
+/// Switch kanshi to a named profile, logging the rationale.
 fn apply_profile(profile: &str, reason: &str) -> Result<(), Box<dyn std::error::Error>> {
     log::info!("lid/output recovery: {reason}; switching kanshi to `{profile}`");
     switch_kanshi_profile(profile);
     Ok(())
 }
 
+/// Helper predicate determining if undocked panel recovery should trigger.
 fn should_recover_undocked(
     closed: bool,
     topology: DisplayTopology,
@@ -169,6 +171,7 @@ fn should_recover_undocked(
         && (topology_changed || retry_due || recovery_due)
 }
 
+/// Split comma-separated fallback profile list into individual profile candidate names.
 fn profile_candidates(profile: &str) -> Vec<&str> {
     profile
         .split(',')
@@ -177,6 +180,7 @@ fn profile_candidates(profile: &str) -> Vec<&str> {
         .collect()
 }
 
+/// Execute `kanshictl switch <profile>` trying each profile candidate until one succeeds.
 fn switch_kanshi_profile(profile: &str) -> bool {
     let profiles = profile_candidates(profile);
     if profiles.is_empty() {
@@ -194,6 +198,7 @@ fn switch_kanshi_profile(profile: &str) -> bool {
     false
 }
 
+/// Execute an external CLI command synchronously and return true if exit status was success.
 fn run_command(program: &str, args: &[&str]) -> bool {
     match Command::new(program).args(args).output() {
         Ok(output) if output.status.success() => true,
@@ -217,7 +222,7 @@ fn run_command(program: &str, args: &[&str]) -> bool {
     }
 }
 
-/// Read the current lid state from /proc/acpi/button/lid.
+/// Read the current lid state from `/proc/acpi/button/lid/LID0/state` (or `LID/state`).
 fn lid_is_closed() -> Result<bool, Box<dyn std::error::Error>> {
     for path in [
         "/proc/acpi/button/lid/LID0/state",
@@ -238,14 +243,16 @@ fn lid_is_closed() -> Result<bool, Box<dyn std::error::Error>> {
     Ok(false)
 }
 
+/// State representation of connected display outputs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DisplayTopology {
+    /// True if internal laptop panel DRM connector is connected.
     internal_connected: bool,
+    /// True if at least one external monitor DRM connector is connected.
     external_connected: bool,
 }
 
-/// Read DRM connector state from sysfs. The kernel may still know the laptop
-/// panel is connected even when river/wlroots temporarily removed the output.
+/// Read DRM connector state from `/sys/class/drm`.
 fn display_topology(internal_output: &str) -> DisplayTopology {
     let mut topology = DisplayTopology {
         internal_connected: false,

@@ -1,4 +1,8 @@
-//! Window management logic: manage/render sequence handling, layout, focus.
+//! Window management state transition handlers (`manage` and `render` sequences).
+//!
+//! Enforces River compositor protocol requirements:
+//! - Window management state operations (`propose_dimensions`, `focus_window`, `close`, `fullscreen`, `use_ssd`/`use_csd`, binding enable/disable) occur strictly inside `manage_start`/`manage_finish`.
+//! - Rendering state operations (`set_position`, `place_top`, `set_borders`, `show`, `hide`) occur inside `render_start`/`render_finish`.
 
 pub mod layout;
 pub mod spawn;
@@ -6,8 +10,9 @@ pub mod spawn;
 use crate::connection::AppData;
 use crate::protocols::wm::river_window_manager_v1::RiverWindowManagerV1;
 
-/// Handle a manage sequence: recompute focus/occupancy, then propose
-/// dimensions for every visible (non-floating) window.
+/// Executes a River manage sequence: processes pointer operations, applies queued window closing/fullscreen requests,
+/// routes keyboard seat focus, computes tiling layout geometries, proposes window content dimensions,
+/// enables/disables hotkeys based on modal resize state, and warps pointer cursor on cross-output switches.
 pub fn on_manage_start(data: &mut AppData, wm: &RiverWindowManagerV1) {
     let started = std::time::Instant::now();
     log::trace!("manage_start");

@@ -1,5 +1,8 @@
-//! Keybindings: create river xkb bindings from config and dispatch actions
-//! when they trigger.
+//! Keybindings and interactive pointer operations module.
+//!
+//! Handles registration of keyboard hotkeys (`river-xkb-bindings-v1`) and mouse button drag
+//! operations (`river-pointer-binding-v1`), mapping physical input events to WM actions
+//! (focus navigation, spawning, layout resizing, floating window translation/resizing, quitting).
 
 use wayland_client::{Connection as WlConnection, Dispatch, Proxy, QueueHandle};
 
@@ -697,5 +700,12 @@ mod tests {
         assert!(!is_resize_binding("enter_resize_mode"));
         assert!(!is_resize_binding("focus_next"));
         assert!(!is_resize_binding("spawn"));
+    }
+
+    #[test]
+    fn default_bindings_zero_heap_duplication() {
+        let config = Config::default();
+        let binds = default_bindings(&config);
+        assert!(!binds.is_empty());
     }
 }

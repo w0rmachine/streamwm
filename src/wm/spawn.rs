@@ -1,9 +1,16 @@
-//! Application spawning: run arbitrary commands for keybindings/launcher
-//! with the correct environment (WAYLAND_DISPLAY forwarded).
+//! Process spawning engine for hotkey actions and application launchers.
+//!
+//! Intelligently determines whether a command can be executed directly via `execvp`
+//! (avoiding subshell overhead) or requires `$SHELL -c` execution due to shell syntax
+//! characters (pipes, quotes, environment variables, redirects).
+//!
+//! Spawns child processes detached with null stdio handles and reaps exited children
+//! on dedicated background threads to prevent zombie process leakage.
 
 use std::process::{Command, Stdio};
 
-/// Spawn a shell command detached from streamwm.
+/// Spawns an arbitrary command string detached from streamwm.
+/// Automatically selects direct binary execution for simple commands or `$SHELL -c` for shell strings.
 pub fn spawn(command: &str) {
     log::info!("spawn: {command}");
     let started = if let Some(args) = direct_command_args(command) {
@@ -41,6 +48,8 @@ fn spawn_command(args: Vec<String>) -> std::io::Result<std::process::Child> {
         .spawn()
 }
 
+/// Analyzes a command string to check if it can be split into plain argument tokens
+/// without shell syntax evaluation. Returns `Some(Vec<String>)` for direct execution, or `None` if shell is needed.
 fn direct_command_args(command: &str) -> Option<Vec<String>> {
     let trimmed = command.trim();
     if trimmed.is_empty() || trimmed.bytes().any(shell_syntax_byte) {
@@ -55,6 +64,7 @@ fn direct_command_args(command: &str) -> Option<Vec<String>> {
     )
 }
 
+/// Returns true if `byte` is a special shell syntax character (`'"`|&$;<>()$`*?~{}[]=\n\r`).
 fn shell_syntax_byte(byte: u8) -> bool {
     matches!(
         byte,

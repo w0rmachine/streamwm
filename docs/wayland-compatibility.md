@@ -83,9 +83,6 @@ with the protocol.
 
 ## Known Gaps
 
-- `dimensions_hint`, pointer move/resize requests, maximize/minimize requests,
-  and presentation hints are not yet acted on.
-- Floating windows use a fixed default rectangle until move/resize support is
-  implemented.
-- Status socket is private only by filesystem path under `XDG_RUNTIME_DIR`; keep
-  `allow_spawn = false` if untrusted local processes can reach it.
+- `dimensions_hint`, client-driven maximize/minimize requests, and presentation hints are not yet acted on.
+- Floating windows support interactive move (`Mod+Left-Click-Drag`) and resize (`Mod+Right-Click-Drag`) via `river-pointer-binding-v1` and seat operations.
+- Status socket is private only by filesystem path under `XDG_RUNTIME_DIR`; keep `allow_spawn = false` if untrusted local processes can reach it.

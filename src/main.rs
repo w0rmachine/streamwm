@@ -1,4 +1,20 @@
-//! streamwm — a tiling window manager for the river Wayland compositor.
+//! # streamwm
+//!
+//! `streamwm` is a custom tiling window manager client for the `river` Wayland compositor.
+//!
+//! Unlike monolithic Wayland compositors, `river` delegates window management policy
+//! (layout calculation, seat focus, tag assignments, window borders, hotkeys) to an
+//! external client through the `river-window-management-v1` Wayland protocol.
+//!
+//! ## Execution Modes
+//!
+//! `streamwm` operates in one of two modes:
+//! 1. **Supervisor Mode** (default entry point): Spawns and monitors a child worker process.
+//!    If the worker crashes unexpectedly (e.g. temporary Wayland protocol error), the supervisor
+//!    automatically restarts it using a bounded exponential backoff.
+//! 2. **Worker Mode** (invoked with `--streamwm-worker`): Performs configuration loading,
+//!    ACPI lid background thread initialization, Unix status socket creation, and connects to the
+//!    `river` compositor event loop.
 #![allow(dead_code)] // several fields are placeholders for upcoming features
 
 use std::collections::VecDeque;
@@ -17,12 +33,23 @@ mod state;
 mod status;
 mod wm;
 
+/// Internal flag passed to the worker child process by the supervisor.
 const WORKER_ARG: &str = "--streamwm-worker";
+
+/// Rolling time window (60 seconds) within which worker crash restarts are counted.
 const RESTART_WINDOW: Duration = Duration::from_secs(60);
+
+/// Maximum allowed crash restarts within `RESTART_WINDOW` before the supervisor gives up.
 const MAX_RESTARTS_IN_WINDOW: usize = 5;
+
+/// Initial delay (250ms) before restarting a crashed worker.
 const INITIAL_RESTART_DELAY: Duration = Duration::from_millis(250);
+
+/// Maximum capped delay (4s) between supervisor restarts.
 const MAX_RESTART_DELAY: Duration = Duration::from_secs(4);
 
+/// Main entry point for `streamwm`. Initializes logging, inspects CLI flags to determine
+/// whether to run as supervisor or worker process, and executes the designated mode.
 fn main() -> ExitCode {
     if std::env::var("RUST_LOG").is_err() {
         std::env::set_var("RUST_LOG", "info");
@@ -37,6 +64,9 @@ fn main() -> ExitCode {
     supervise(std::env::args_os().skip(1).collect())
 }
 
+/// Runs the primary window manager worker process.
+/// Loads configuration from `config_path` (or `/etc/streamwm/config.toml` default),
+/// initializes lid state polling if enabled, and connects to the Wayland server.
 fn run_worker(config_path: Option<OsString>) -> ExitCode {
     let config_path = config_path
         .map(|path| path.to_string_lossy().into_owned())
@@ -55,6 +85,9 @@ fn run_worker(config_path: Option<OsString>) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// Supervisor loop that monitors worker process execution.
+/// If the worker process exits with an error status, it tracks failure timestamps
+/// in a rolling queue and restarts the worker using bounded exponential backoff.
 fn supervise(args: Vec<OsString>) -> ExitCode {
     let executable = match std::env::current_exe() {
         Ok(path) => path,
@@ -106,6 +139,8 @@ fn supervise(args: Vec<OsString>) -> ExitCode {
     }
 }
 
+/// Calculates exponential backoff restart delay based on recent failure count.
+/// Returns delays between `INITIAL_RESTART_DELAY` (250ms) and `MAX_RESTART_DELAY` (4s).
 fn restart_delay(recent_failures: usize) -> Duration {
     let exponent = recent_failures.saturating_sub(1).min(4) as u32;
     INITIAL_RESTART_DELAY
