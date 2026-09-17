@@ -54,8 +54,10 @@ pub fn spawn(config: Lid) {
 fn run(config: &Lid) -> Result<(), Box<dyn std::error::Error>> {
     log::info!("lid listener: polling ACPI lid state");
 
-    // Seed the previous state so we only react to *transitions*, not the
-    // initial state at startup.
+    // Keep the previous state to distinguish startup from later transitions.
+    // Startup is deliberately handled as a topology event: a session may begin
+    // with the lid already closed, in which case waiting for a transition would
+    // leave Kanshi on an arbitrary profile indefinitely.
     let mut prev_lid_closed: Option<bool> = None;
     let mut prev_topology: Option<DisplayTopology> = None;
     let mut last_undocked_recovery = Instant::now()
@@ -67,10 +69,15 @@ fn run(config: &Lid) -> Result<(), Box<dyn std::error::Error>> {
         let closed = lid_is_closed()?;
         let topology = display_topology(&config.internal_output);
 
-        if let Some(prev) = prev_lid_closed {
+        let initial_state = prev_topology.is_none();
+        let topology_changed = prev_topology != Some(topology);
+
+        if prev_lid_closed.is_none() {
+            apply_current_profile(config, closed, topology, "initial display state")?;
+        } else if let Some(prev) = prev_lid_closed {
             if closed != prev {
                 if closed {
-                    apply_profile(&config.close_profile, "lid closed")?;
+                    apply_closed_profile(config, topology, "lid closed")?;
                 } else {
                     // Reopening: wait for the panel to reconnect, switch, then
                     // retry once to catch the race where kanshi applies the
@@ -84,8 +91,7 @@ fn run(config: &Lid) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        if !closed {
-            let topology_changed = prev_topology != Some(topology);
+        if !closed && !initial_state {
             let recovery_due = last_undocked_recovery.elapsed() >= UNDOCKED_RECOVERY_INTERVAL;
             let retry_due = undocked_retry.is_some_and(|(_, due)| Instant::now() >= due);
 
@@ -111,6 +117,11 @@ fn run(config: &Lid) -> Result<(), Box<dyn std::error::Error>> {
             } else if !topology.internal_connected || topology.external_connected {
                 undocked_retry = None;
             }
+        } else if !initial_state && topology_changed {
+            // A dock can be attached or removed while the lid is already
+            // closed. Re-evaluate instead of waiting for another lid event.
+            apply_closed_profile(config, topology, "closed-lid topology changed")?;
+            undocked_retry = None;
         } else {
             undocked_retry = None;
         }
@@ -120,6 +131,45 @@ fn run(config: &Lid) -> Result<(), Box<dyn std::error::Error>> {
 
         thread::sleep(POLL_INTERVAL);
     }
+}
+
+/// Apply the profile matching the current lid state and connector topology.
+fn apply_current_profile(
+    config: &Lid,
+    closed: bool,
+    topology: DisplayTopology,
+    reason: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if closed {
+        apply_closed_profile(config, topology, reason)
+    } else if topology.internal_connected && !topology.external_connected {
+        recover_undocked(config)
+    } else {
+        apply_profile(&config.open_profile, reason)
+    }
+}
+
+/// Apply clamshell only when an external display is available. Keeping the
+/// internal panel enabled without one prevents a closed-lid undock from
+/// stranding the session on a black screen.
+fn apply_closed_profile(
+    config: &Lid,
+    topology: DisplayTopology,
+    reason: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if clamshell_available(topology) {
+        apply_profile(&config.close_profile, reason)
+    } else {
+        log::info!(
+            "lid/output recovery: {reason}; no external output is connected, preserving `{}`",
+            config.internal_output
+        );
+        recover_undocked(config)
+    }
+}
+
+fn clamshell_available(topology: DisplayTopology) -> bool {
+    topology.external_connected
 }
 
 /// Recover outputs for an open lid based on the current connector topology.
@@ -329,5 +379,20 @@ mod tests {
         assert!(should_recover_undocked(false, undocked, false, true, false));
         assert!(!should_recover_undocked(true, undocked, true, true, true));
         assert!(!should_recover_undocked(false, docked, true, true, true));
+    }
+
+    #[test]
+    fn clamshell_requires_an_external_output() {
+        let external = DisplayTopology {
+            internal_connected: true,
+            external_connected: true,
+        };
+        let internal_only = DisplayTopology {
+            internal_connected: true,
+            external_connected: false,
+        };
+
+        assert!(clamshell_available(external));
+        assert!(!clamshell_available(internal_only));
     }
 }
