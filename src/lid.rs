@@ -12,7 +12,7 @@
 
 use std::fs;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -32,6 +32,10 @@ const OPEN_RETRY_DELAY: Duration = Duration::from_millis(2000);
 /// panel is connected. This covers output-loss races that happen after
 /// undocking without another lid transition.
 const UNDOCKED_RECOVERY_INTERVAL: Duration = Duration::from_secs(30);
+/// Fast retries after an output topology change. Dock removal and resume can
+/// race river's DRM reprobe, so a single immediate profile switch is not
+/// sufficient even though sysfs already reports the panel as connected.
+const UNDOCKED_RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(2), Duration::from_secs(5)];
 
 /// Spawn a background thread that watches lid open/close transitions and
 /// switches kanshi profiles accordingly.
@@ -56,6 +60,7 @@ fn run(config: &Lid) -> Result<(), Box<dyn std::error::Error>> {
     let mut last_undocked_recovery = Instant::now()
         .checked_sub(UNDOCKED_RECOVERY_INTERVAL)
         .unwrap_or_else(Instant::now);
+    let mut undocked_retry: Option<(usize, Instant)> = None;
 
     loop {
         let closed = lid_is_closed()?;
@@ -81,16 +86,32 @@ fn run(config: &Lid) -> Result<(), Box<dyn std::error::Error>> {
         if !closed {
             let topology_changed = prev_topology != Some(topology);
             let recovery_due = last_undocked_recovery.elapsed() >= UNDOCKED_RECOVERY_INTERVAL;
+            let retry_due = undocked_retry.is_some_and(|(_, due)| Instant::now() >= due);
 
-            if topology.internal_connected
-                && !topology.external_connected
-                && (topology_changed || recovery_due)
+            if should_recover_undocked(closed, topology, topology_changed, retry_due, recovery_due)
             {
                 recover_undocked(config)?;
-                last_undocked_recovery = Instant::now();
+                let recovered_at = Instant::now();
+                last_undocked_recovery = recovered_at;
+
+                undocked_retry = if topology_changed {
+                    Some((0, recovered_at + UNDOCKED_RETRY_DELAYS[0]))
+                } else if let Some((retry, _)) = undocked_retry {
+                    let next = retry + 1;
+                    UNDOCKED_RETRY_DELAYS
+                        .get(next)
+                        .map(|delay| (next, recovered_at + *delay))
+                } else {
+                    None
+                };
             } else if topology_changed && topology.external_connected {
+                undocked_retry = None;
                 apply_profile(&config.open_profile, "external output connected")?;
+            } else if !topology.internal_connected || topology.external_connected {
+                undocked_retry = None;
             }
+        } else {
+            undocked_retry = None;
         }
 
         prev_lid_closed = Some(closed);
@@ -120,39 +141,80 @@ fn recover_undocked(config: &Lid) -> Result<(), Box<dyn std::error::Error>> {
         config.undocked_profile
     );
 
-    run_shell_detached(&format!(
-        "if command -v wlr-randr >/dev/null 2>&1; then wlr-randr --output {} --on --preferred || true; fi; \
-         if command -v kanshictl >/dev/null 2>&1; then kanshictl switch {} || true; fi",
-        sh_quote(&config.internal_output),
-        sh_quote(&config.undocked_profile)
-    ));
+    run_command(
+        "wlr-randr",
+        &["--output", &config.internal_output, "--on", "--preferred"],
+    );
+    switch_kanshi_profile(&config.undocked_profile);
     Ok(())
 }
 
 /// Switch kanshi to a named profile.
 fn apply_profile(profile: &str, reason: &str) -> Result<(), Box<dyn std::error::Error>> {
     log::info!("lid/output recovery: {reason}; switching kanshi to `{profile}`");
+    switch_kanshi_profile(profile);
+    Ok(())
+}
 
-    let mut kanshi_cmd = String::new();
-    for p in profile.split(',') {
-        let p = p.trim();
-        if !p.is_empty() {
-            if !kanshi_cmd.is_empty() {
-                kanshi_cmd.push_str(" || ");
-            }
-            kanshi_cmd.push_str(&format!("kanshictl switch {}", sh_quote(p)));
+fn should_recover_undocked(
+    closed: bool,
+    topology: DisplayTopology,
+    topology_changed: bool,
+    retry_due: bool,
+    recovery_due: bool,
+) -> bool {
+    !closed
+        && topology.internal_connected
+        && !topology.external_connected
+        && (topology_changed || retry_due || recovery_due)
+}
+
+fn profile_candidates(profile: &str) -> Vec<&str> {
+    profile
+        .split(',')
+        .map(str::trim)
+        .filter(|candidate| !candidate.is_empty())
+        .collect()
+}
+
+fn switch_kanshi_profile(profile: &str) -> bool {
+    let profiles = profile_candidates(profile);
+    if profiles.is_empty() {
+        log::warn!("no kanshi profile configured for output recovery");
+        return false;
+    }
+
+    for profile in profiles {
+        if run_command("kanshictl", &["switch", profile]) {
+            return true;
         }
     }
 
-    if kanshi_cmd.is_empty() {
-        return Ok(());
-    }
+    log::warn!("none of the configured kanshi profiles matched: `{profile}`");
+    false
+}
 
-    run_shell_detached(&format!(
-        "if command -v kanshictl >/dev/null 2>&1; then {} || true; fi",
-        kanshi_cmd
-    ));
-    Ok(())
+fn run_command(program: &str, args: &[&str]) -> bool {
+    match Command::new(program).args(args).output() {
+        Ok(output) if output.status.success() => true,
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            log::warn!(
+                "output recovery command `{program} {}` failed with {}: {}",
+                args.join(" "),
+                output.status,
+                stderr.trim()
+            );
+            false
+        }
+        Err(error) => {
+            log::warn!(
+                "could not run output recovery command `{program} {}`: {error}",
+                args.join(" ")
+            );
+            false
+        }
+    }
 }
 
 /// Read the current lid state from /proc/acpi/button/lid.
@@ -226,29 +288,6 @@ fn drm_output_name(card_name: &str) -> Option<&str> {
     Some(output)
 }
 
-fn run_shell_detached(command: &str) {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-    match Command::new(shell)
-        .arg("-c")
-        .arg(command)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    {
-        Ok(mut child) => {
-            thread::spawn(move || {
-                let _ = child.wait();
-            });
-        }
-        Err(e) => log::error!("output recovery spawn failed for `{command}`: {e}"),
-    }
-}
-
-fn sh_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,8 +300,27 @@ mod tests {
     }
 
     #[test]
-    fn shell_quotes_single_quotes() {
-        assert_eq!(sh_quote("eDP-1"), "'eDP-1'");
-        assert_eq!(sh_quote("bad'value"), "'bad'\\''value'");
+    fn parses_kanshi_profile_fallbacks() {
+        assert_eq!(
+            profile_candidates("office, home ,,"),
+            vec!["office", "home"]
+        );
+    }
+
+    #[test]
+    fn recovery_requires_an_open_lid_and_only_the_internal_output() {
+        let undocked = DisplayTopology {
+            internal_connected: true,
+            external_connected: false,
+        };
+        let docked = DisplayTopology {
+            internal_connected: true,
+            external_connected: true,
+        };
+
+        assert!(should_recover_undocked(false, undocked, true, false, false));
+        assert!(should_recover_undocked(false, undocked, false, true, false));
+        assert!(!should_recover_undocked(true, undocked, true, true, true));
+        assert!(!should_recover_undocked(false, docked, true, true, true));
     }
 }

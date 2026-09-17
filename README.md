@@ -20,8 +20,8 @@ decorations.
   (`←`/`→`, or `h`/`l`), `Escape` to leave.
 - **Floating windows** (toggle with `Mod+v`): drag with `Mod`+left-button,
   resize with `Mod`+right-button.
-- **Lid-switch / clamshell** handling via systemd logind, switching kanshi
-  profiles on open/close.
+- **Lid-switch / clamshell** handling via ACPI/sysfs polling, switching kanshi
+  profiles on open/close and recovering the internal panel after undocking.
 - **Status/control** over a JSON Unix socket
   (`$XDG_RUNTIME_DIR/streamwm-<display>.sock`), exposing focused output,
   active/occupied/urgent tag masks, and windows.
@@ -37,7 +37,7 @@ decorations.
 - `src/wm/layout.rs` — tiling layout; `src/wm/spawn.rs` — command spawning.
 - `src/bindings.rs` — keybindings and actions.
 - `src/status.rs` — the JSON socket server.
-- `src/lid.rs` — logind lid listener.
+- `src/lid.rs` — lid/output topology polling and recovery.
 
 Detailed river/Wayland sequence notes live in
 [`docs/wayland-compatibility.md`](docs/wayland-compatibility.md).
@@ -75,3 +75,8 @@ The master/stack split and resize-step are also configurable:
 master_fraction = 0.55   # master window width fraction (0.1..=0.9)
 resize_step = 0.05       # amount changed per resize-mode arrow key
 ```
+
+When lid handling is enabled, the session should hold logind's low-level
+`handle-lid-switch` inhibitor. This prevents unplugging a dock with the lid
+closed from suspending the machine before streamwm can switch outputs. The
+session remains responsible for its desired suspend policy.
