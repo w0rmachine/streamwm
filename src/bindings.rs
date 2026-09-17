@@ -91,7 +91,8 @@ pub fn default_bindings(config: &crate::config::Config) -> Vec<(String, String, 
         ("q".into(), "".into(), "close".into()),
         ("E".into(), config.modifier.clone(), "quit".into()),
         ("f".into(), "".into(), "fullscreen".into()),
-        ("v".into(), "".into(), "float".into()),
+        ("v".into(), "".into(), "fullscreen".into()),
+        ("v".into(), "shift".into(), "float".into()),
         ("j".into(), "".into(), "focus_next".into()),
         ("k".into(), "".into(), "focus_prev".into()),
         ("h".into(), "".into(), "focus_prev_output".into()),
@@ -615,6 +616,12 @@ mod tests {
             .iter()
             .any(|(_, _, action)| action == "spawn_terminal"));
         assert!(bindings.iter().any(|(_, _, action)| action == "focus_next"));
+        assert!(bindings.iter().any(|(key, modifiers, action)| key == "v"
+            && modifiers.is_empty()
+            && action == "fullscreen"));
+        assert!(bindings.iter().any(|(key, modifiers, action)| key == "v"
+            && modifiers == "shift"
+            && action == "float"));
         assert!(bindings.iter().any(|(key, modifiers, action)| key == "E"
             && modifiers == "super"
             && action == "quit"));
