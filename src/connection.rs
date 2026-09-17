@@ -117,7 +117,9 @@ impl AppData {
 
 pub fn run(config: &Config) -> Result<(), String> {
     let conn = wayland_client::Connection::connect_to_env().map_err(|e| format!("connect: {e}"))?;
-    let state = Rc::new(RefCell::new(State::new(config.master_fraction.clamp(0.1, 0.9))));
+    let state = Rc::new(RefCell::new(State::new(
+        config.master_fraction.clamp(0.1, 0.9),
+    )));
     let mut data = AppData::new(state, Rc::new(config.clone()));
 
     let (globals, mut event_queue) =
@@ -258,11 +260,7 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppData {
             WmEvent::Window { id } => {
                 let mut state = data.state.borrow_mut();
                 let output = state.active_output().unwrap_or(0);
-                let tag = state
-                    .outputs
-                    .get(output)
-                    .map(|o| o.active_tag)
-                    .unwrap_or(0);
+                let tag = state.outputs.get(output).map(|o| o.active_tag).unwrap_or(0);
                 state.windows.push(Window::new(id, tag));
                 if let Some(window) = state.windows.last() {
                     let wid = window.id;

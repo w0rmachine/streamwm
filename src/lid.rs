@@ -132,9 +132,25 @@ fn recover_undocked(config: &Lid) -> Result<(), Box<dyn std::error::Error>> {
 /// Switch kanshi to a named profile.
 fn apply_profile(profile: &str, reason: &str) -> Result<(), Box<dyn std::error::Error>> {
     log::info!("lid/output recovery: {reason}; switching kanshi to `{profile}`");
+
+    let mut kanshi_cmd = String::new();
+    for p in profile.split(',') {
+        let p = p.trim();
+        if !p.is_empty() {
+            if !kanshi_cmd.is_empty() {
+                kanshi_cmd.push_str(" || ");
+            }
+            kanshi_cmd.push_str(&format!("kanshictl switch {}", sh_quote(p)));
+        }
+    }
+
+    if kanshi_cmd.is_empty() {
+        return Ok(());
+    }
+
     run_shell_detached(&format!(
-        "if command -v kanshictl >/dev/null 2>&1; then kanshictl switch {} || true; fi",
-        sh_quote(profile)
+        "if command -v kanshictl >/dev/null 2>&1; then {} || true; fi",
+        kanshi_cmd
     ));
     Ok(())
 }

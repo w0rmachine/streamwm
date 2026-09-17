@@ -379,7 +379,11 @@ fn run_action(data: &mut AppData, action: &str) {
             // Resize the master fraction of the *active tag*, so the split is
             // remembered per tag rather than shared across the whole session.
             let step = data.config.resize_step;
-            let delta = if name == "resize_step_right" { step } else { -step };
+            let delta = if name == "resize_step_right" {
+                step
+            } else {
+                -step
+            };
             if let Some(o) = s.active_output() {
                 let active_tag = s.outputs[o].active_tag;
                 let cur = s.master_fraction(active_tag);
@@ -417,10 +421,8 @@ impl Dispatch<RiverXkbBindingV1, ()> for AppData {
     }
 }
 
-impl Dispatch<
-    crate::protocols::wm::river_pointer_binding_v1::RiverPointerBindingV1,
-    (),
-> for AppData
+impl Dispatch<crate::protocols::wm::river_pointer_binding_v1::RiverPointerBindingV1, ()>
+    for AppData
 {
     fn event(
         data: &mut Self,
@@ -660,12 +662,16 @@ mod tests {
         assert!(bindings.iter().any(|(key, modifiers, action)| key == "Left"
             && modifiers == "none"
             && action == "resize_step_left"));
-        assert!(bindings.iter().any(|(key, modifiers, action)| key == "Right"
-            && modifiers == "none"
-            && action == "resize_step_right"));
-        assert!(bindings.iter().any(|(key, modifiers, action)| key == "Escape"
-            && modifiers == "none"
-            && action == "exit_resize_mode"));
+        assert!(bindings
+            .iter()
+            .any(|(key, modifiers, action)| key == "Right"
+                && modifiers == "none"
+                && action == "resize_step_right"));
+        assert!(bindings
+            .iter()
+            .any(|(key, modifiers, action)| key == "Escape"
+                && modifiers == "none"
+                && action == "exit_resize_mode"));
     }
 
     #[test]
