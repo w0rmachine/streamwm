@@ -92,9 +92,11 @@ pub fn default_bindings(config: &crate::config::Config) -> Vec<(String, String, 
         ("E".into(), config.modifier.clone(), "quit".into()),
         ("f".into(), "".into(), "fullscreen".into()),
         ("v".into(), "".into(), "fullscreen".into()),
-        ("v".into(), "shift".into(), "float".into()),
+        ("v".into(), modified_shift.clone(), "float".into()),
         ("j".into(), "".into(), "focus_next".into()),
         ("k".into(), "".into(), "focus_prev".into()),
+        ("Tab".into(), "".into(), "focus_next".into()),
+        ("Tab".into(), modified_shift.clone(), "focus_prev".into()),
         ("h".into(), "".into(), "focus_prev_output".into()),
         ("l".into(), "".into(), "focus_next_output".into()),
         ("space".into(), "".into(), "cycle_layout".into()),
@@ -228,7 +230,7 @@ fn run_action(data: &mut AppData, action: &str) {
                 let ids: Vec<u32> = s
                     .windows
                     .iter()
-                    .filter(|w| s.tag_owner(w.tag) == Some(o) && w.tag == active && !w.floating)
+                    .filter(|w| s.tag_owner(w.tag) == Some(o) && w.tag == active)
                     .map(|w| w.id)
                     .collect();
                 if !ids.is_empty() {
@@ -620,8 +622,14 @@ mod tests {
             && modifiers.is_empty()
             && action == "fullscreen"));
         assert!(bindings.iter().any(|(key, modifiers, action)| key == "v"
-            && modifiers == "shift"
+            && modifiers == "super+shift"
             && action == "float"));
+        assert!(bindings.iter().any(|(key, modifiers, action)| key == "Tab"
+            && modifiers.is_empty()
+            && action == "focus_next"));
+        assert!(bindings.iter().any(|(key, modifiers, action)| key == "Tab"
+            && modifiers == "super+shift"
+            && action == "focus_prev"));
         assert!(bindings.iter().any(|(key, modifiers, action)| key == "E"
             && modifiers == "super"
             && action == "quit"));
