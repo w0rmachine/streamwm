@@ -56,6 +56,8 @@ pub struct AppData {
     pub pending_close: Vec<u32>,
     /// Shared thread-safe state snapshot accessed by the JSON socket server.
     pub snapshot: Option<std::sync::Arc<std::sync::Mutex<crate::status::StatusSnapshot>>>,
+    /// Registry of long-lived `subscribe` clients receiving pushed snapshots.
+    pub subscribers: Option<std::sync::Arc<std::sync::Mutex<crate::status::Subscribers>>>,
     /// Active registered pointer binding proxies mapped to `"move"` or `"resize"`.
     pub pointer_bindings: Vec<(
         crate::protocols::wm::river_pointer_binding_v1::RiverPointerBindingV1,
@@ -118,6 +120,7 @@ impl AppData {
             layer_default_set: false,
             pending_close: Vec::new(),
             snapshot: None,
+            subscribers: None,
             pointer_bindings: Vec::new(),
             pointer_op: None,
             pending_op: None,
@@ -153,8 +156,9 @@ pub fn run(config: &Config) -> Result<(), String> {
     wake_writer
         .set_nonblocking(true)
         .map_err(|e| format!("status wake writer nonblocking: {e}"))?;
-    let (command_rx, snapshot) = crate::status::start(wake_writer);
+    let (command_rx, snapshot, subscribers) = crate::status::start(wake_writer);
     data.snapshot = Some(snapshot);
+    data.subscribers = Some(subscribers);
 
     info!("streamwm connected; entering event loop");
 

@@ -84,6 +84,7 @@ River enforces a strict protocol state split:
 - Line-delimited JSON protocol for external scripting and status bar integration.
 - **Queries**: `get_status` returns JSON state snapshots (focused output, outputs, active/owned/occupied tag bitmasks, windows).
 - **Commands**: `focus_tag`, `send_to_tag`, `focus_output`, `focus_window`, `spawn`, `quit`.
+- **Push Subscriptions**: `subscribe` converts the connection into a long-lived stream. The current snapshot is written immediately, then a new snapshot is written on every `refresh_snapshot` (i.e. every manage/render cycle). Delivery is converging: only the newest snapshot is retained per client, so a slow consumer skips intermediate states rather than queueing, and publishing never blocks the WM thread.
 - **Security Guard**: `allow_spawn` config toggle protects socket execution of arbitrary binaries.
 
 ### Supervisor Auto-Restart Engine (`src/main.rs`)

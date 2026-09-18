@@ -1,6 +1,6 @@
 [package]
 name = "streamwm"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2021"
 description = "A tiling window manager for the river Wayland compositor"
 license = "MIT"
