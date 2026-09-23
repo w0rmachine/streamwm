@@ -68,8 +68,12 @@ pub struct Window {
     pub fullscreen: bool,
     /// True if fullscreen request has been sent to River.
     pub fullscreen_applied: bool,
+    /// Whether the window is minimized (hidden) by a window-initiated request.
+    pub minimized: bool,
     /// Last applied decoration mode (`Some(true)` = SSD, `Some(false)` = CSD).
     pub ssd_applied: Option<bool>,
+    /// Whether `set_capabilities` has been sent for this window yet.
+    pub caps_set: bool,
     /// Last content dimensions proposed to River compositor.
     pub proposed_dimensions: Option<(u32, u32)>,
     /// Last border configuration sent to River: (focused, width, r, g, b).
@@ -96,7 +100,9 @@ impl Window {
             height: 0,
             fullscreen: false,
             fullscreen_applied: false,
+            minimized: false,
             ssd_applied: None,
+            caps_set: false,
             proposed_dimensions: None,
             border_applied: None,
             node: None,

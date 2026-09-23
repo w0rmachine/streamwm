@@ -184,7 +184,8 @@ pub fn render_all_run(data: &mut AppData) {
                     .find(|(wid, _)| *wid == w.id)
                     .map(|(_, g)| *g);
                 let floating_visible = w.floating && state.window_is_visible(w);
-                (w.id, geom.is_some() || floating_visible, geom)
+                let visible = !w.minimized && (geom.is_some() || floating_visible);
+                (w.id, visible, geom)
             })
             .collect()
     };

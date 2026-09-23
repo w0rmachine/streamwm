@@ -94,6 +94,28 @@ impl Dispatch<RiverWindowV1, ()> for AppData {
                     needs_manage = true;
                 }
             }
+            WindowEvent::MaximizeRequested => {
+                // A tiling WM's maximize equals filling the output, i.e.
+                // fullscreen; honor it and inform the app in on_manage_start.
+                if let Some(w) = state.find_window_mut(id) {
+                    w.fullscreen = true;
+                    needs_manage = true;
+                }
+            }
+            WindowEvent::UnmaximizeRequested => {
+                if let Some(w) = state.find_window_mut(id) {
+                    w.fullscreen = false;
+                    needs_manage = true;
+                }
+            }
+            WindowEvent::MinimizeRequested => {
+                // Hide the window until it is interacted with again; streamwm
+                // has no minimize state, so hidden + tag focus is the analog.
+                if let Some(w) = state.find_window_mut(id) {
+                    w.minimized = true;
+                    needs_manage = true;
+                }
+            }
             _ => {}
         }
         drop(state);
@@ -258,8 +280,11 @@ impl Dispatch<RiverSeatV1, ()> for AppData {
             }
             SeatEvent::WindowInteraction { window } => {
                 // A pointer button press / touch on a window: focus it,
-                // regardless of focus-follows-mouse.
+                // regardless of focus-follows-mouse, and un-minimize it.
                 if let Some(wid) = state.find_window_by_proxy(&window) {
+                    if let Some(w) = state.find_window_mut(wid) {
+                        w.minimized = false;
+                    }
                     if let Some(tag) = state.find_window(wid).map(|w| w.tag) {
                         if let Some(output) = state.tag_owner(tag) {
                             if output < state.outputs.len() {

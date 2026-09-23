@@ -63,6 +63,19 @@ pub fn on_manage_start(data: &mut AppData, wm: &RiverWindowManagerV1) {
             .map(|w| state.tag_owner(w.tag).unwrap_or(0))
             .collect();
         for (i, w) in state.windows.iter_mut().enumerate() {
+            if !w.caps_set {
+                // Declare the window-management capabilities streamwm actually
+                // honors so apps hide unsupported buttons. We support maximize
+                // (mapped to fullscreen), fullscreen, and minimize (hide); we
+                // do not show a window menu.
+                use crate::protocols::wm::river_window_v1::Capabilities;
+                let caps = Capabilities::Maximize
+                    | Capabilities::Fullscreen
+                    | Capabilities::Minimize;
+                w.proxy.set_capabilities(caps);
+                w.caps_set = true;
+            }
+
             if w.ssd_applied != Some(data.config.use_ssd) {
                 if data.config.use_ssd {
                     w.proxy.use_ssd();
@@ -76,10 +89,17 @@ pub fn on_manage_start(data: &mut AppData, wm: &RiverWindowManagerV1) {
                 if w.fullscreen {
                     if let Some(output) = outputs.get(window_outputs[i]) {
                         w.proxy.fullscreen(output);
+                        // Inform the app of both its maximized and fullscreen
+                        // state so CSD titlebars update accordingly; a tiling
+                        // WM's maximize and fullscreen are the same outcome.
+                        w.proxy.inform_maximized();
+                        w.proxy.inform_fullscreen();
                         w.fullscreen_applied = true;
                     }
                 } else {
                     w.proxy.exit_fullscreen();
+                    w.proxy.inform_unmaximized();
+                    w.proxy.inform_not_fullscreen();
                     w.fullscreen_applied = false;
                 }
             }
