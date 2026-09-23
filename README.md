@@ -24,7 +24,7 @@ decorations.
   profiles on open/close and recovering the internal panel after undocking.
 - **Status/control** over a JSON Unix socket
   (`$XDG_RUNTIME_DIR/streamwm-<display>.sock`), exposing focused output,
-  active/occupied/urgent tag masks, and windows.
+  active/occupied tag masks, and windows.
 - **Push subscriptions**: a client can send `{"cmd":"subscribe"}` to receive the
   current snapshot immediately and a new one on every WM state change, instead
   of polling `get_status`. Delivery converges on the newest state, so a slow

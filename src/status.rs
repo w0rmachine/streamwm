@@ -120,8 +120,6 @@ pub struct OutputSnap {
     pub owned_mask: u32,
     /// Bitmask of tags owned by this output that contain at least one window.
     pub occupied_mask: u32,
-    /// Bitmask of tags with urgent windows.
-    pub urgent_mask: u32,
     /// Tag metadata list.
     pub tags: Vec<TagSnap>,
     /// Window metadata list attached to tags owned by this output.
@@ -195,7 +193,6 @@ pub fn build_snapshot(state: &State, allow_spawn: bool) -> StatusSnapshot {
                 active_mask,
                 owned_mask: 0,
                 occupied_mask: 0,
-                urgent_mask: 0,
                 tags,
                 windows: Vec::new(),
                 focused_window: output.focused_window,
