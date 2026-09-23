@@ -15,6 +15,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+use nix::sys::eventfd::EventFd;
 use serde::{Deserialize, Serialize};
 
 use crate::state::State;
@@ -236,7 +237,7 @@ pub fn build_snapshot(state: &State, allow_spawn: bool) -> StatusSnapshot {
 /// Returns the command receiver, the shared snapshot, and the subscriber
 /// registry used to push snapshots to `subscribe` clients.
 pub fn start(
-    wake: UnixStream,
+    wake: Arc<EventFd>,
 ) -> (
     mpsc::Receiver<Command>,
     Arc<Mutex<StatusSnapshot>>,
@@ -251,7 +252,7 @@ pub fn start(
 /// `$XDG_RUNTIME_DIR` socket.
 fn start_on(
     socket_path: std::path::PathBuf,
-    wake: UnixStream,
+    wake: Arc<EventFd>,
 ) -> (
     mpsc::Receiver<Command>,
     Arc<Mutex<StatusSnapshot>>,
@@ -282,13 +283,7 @@ fn start_on(
             let snap = snapshot_for_thread.clone();
             let subs = subscribers_for_thread.clone();
             let tx = tx_for_thread.clone();
-            let wake = match wake.try_clone() {
-                Ok(wake) => wake,
-                Err(e) => {
-                    log::warn!("failed to clone status wake socket: {e}");
-                    continue;
-                }
-            };
+            let wake = wake.clone();
             thread::spawn(move || handle_client(stream, snap, subs, tx, wake));
         }
     });
@@ -308,7 +303,7 @@ fn handle_client(
     snapshot: Arc<Mutex<StatusSnapshot>>,
     subscribers: Arc<Mutex<Subscribers>>,
     tx: mpsc::Sender<Command>,
-    mut wake: UnixStream,
+    wake: Arc<EventFd>,
 ) {
     // Hardening: set a read timeout (2s) so idle or malicious socket connections do not block indefinitely.
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
@@ -358,7 +353,7 @@ fn handle_client(
         match result {
             Some(cmd) => {
                 let _ = tx.send(cmd);
-                let _ = wake.write_all(&[1]);
+                let _ = wake.write(1);
                 let _ = writeln!(writer, "{{\"status\":\"ok\"}}");
             }
             None => {
@@ -687,9 +682,9 @@ mod tests {
         let path = dir.join("test.sock");
         let _ = std::fs::remove_file(&path);
 
-        let (wake_reader, wake_writer) = UnixStream::pair().unwrap();
-        wake_reader.set_nonblocking(true).unwrap();
-        let (_rx, snapshot, subscribers) = start_on(path.clone(), wake_writer);
+        let wake =
+            Arc::new(EventFd::from_flags(nix::sys::eventfd::EfdFlags::EFD_NONBLOCK).unwrap());
+        let (_rx, snapshot, subscribers) = start_on(path.clone(), wake);
 
         // Wait for the listener to bind.
         for _ in 0..100 {

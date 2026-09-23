@@ -29,6 +29,7 @@ impl Dispatch<RiverWindowV1, ()> for AppData {
         _qh: &QueueHandle<Self>,
     ) {
         let oid = window.id();
+        let mut needs_manage = false;
         let mut state = data.state.borrow_mut();
         let Some(id) = state.find_window_by_proxy(window) else {
             return;
@@ -77,7 +78,27 @@ impl Dispatch<RiverWindowV1, ()> for AppData {
                     w.height = height as u32;
                 }
             }
+            WindowEvent::FullscreenRequested { .. } => {
+                // Honor a client-initiated fullscreen request (e.g. the `f`/
+                // `F11` key inside a video player or browser). The actual
+                // protocol `fullscreen` request is applied in the next manage
+                // sequence (on_manage_start), matching the WM's own toggle.
+                if let Some(w) = state.find_window_mut(id) {
+                    w.fullscreen = true;
+                    needs_manage = true;
+                }
+            }
+            WindowEvent::ExitFullscreenRequested => {
+                if let Some(w) = state.find_window_mut(id) {
+                    w.fullscreen = false;
+                    needs_manage = true;
+                }
+            }
             _ => {}
+        }
+        drop(state);
+        if needs_manage {
+            request_manage(data);
         }
     }
 }

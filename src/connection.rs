@@ -4,13 +4,16 @@
 //! file descriptor multiplexing via `nix::poll`, IPC wake socket draining, and lifecycle state management.
 
 use std::cell::RefCell;
-use std::io::Read;
 use std::os::fd::AsFd;
-use std::os::unix::net::UnixStream;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use log::info;
 use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
+use nix::sys::eventfd::{EfdFlags, EventFd};
+use nix::sys::signal::{SigSet, Signal};
+use nix::sys::signalfd::SignalFd;
+use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use wayland_client::{
     delegate_noop,
     globals::registry_queue_init,
@@ -147,18 +150,26 @@ pub fn run(config: &Config) -> Result<(), String> {
 
     bind_globals(&globals, &qh, &mut data)?;
 
-    // Start the status/control socket server.
-    let (wake_reader, wake_writer) =
-        UnixStream::pair().map_err(|e| format!("status wake socket: {e}"))?;
-    wake_reader
-        .set_nonblocking(true)
-        .map_err(|e| format!("status wake socket nonblocking: {e}"))?;
-    wake_writer
-        .set_nonblocking(true)
-        .map_err(|e| format!("status wake writer nonblocking: {e}"))?;
-    let (command_rx, snapshot, subscribers) = crate::status::start(wake_writer);
+    // Start the status/control socket server. The wake eventfd is signalled
+    // by the socket thread when a command arrives; the main loop polls it
+    // alongside the Wayland and SIGCHLD fds.
+    let wake = Arc::new(
+        EventFd::from_flags(EfdFlags::EFD_CLOEXEC | EfdFlags::EFD_NONBLOCK)
+            .map_err(|e| format!("status wake eventfd: {e}"))?,
+    );
+    let (command_rx, snapshot, subscribers) = crate::status::start(wake.clone());
     data.snapshot = Some(snapshot);
     data.subscribers = Some(subscribers);
+
+    // Reap children via SIGCHLD instead of a thread per spawned process.
+    let mut sigset = SigSet::empty();
+    sigset.add(Signal::SIGCHLD);
+    // Block SIGCHLD in this thread so it is delivered to the signalfd rather
+    // than interrupting poll; the fd becomes readable when a child exits.
+    nix::sys::signal::pthread_sigmask(nix::sys::signal::SigmaskHow::SIG_BLOCK, Some(&sigset), None)
+        .map_err(|e| format!("block SIGCHLD: {e}"))?;
+    let sigfd = SignalFd::with_flags(&sigset, nix::sys::signalfd::SfdFlags::SFD_NONBLOCK)
+        .map_err(|e| format!("signalfd: {e}"))?;
 
     info!("streamwm connected; entering event loop");
 
@@ -182,10 +193,12 @@ pub fn run(config: &Config) -> Result<(), String> {
 
         let wayland_ready;
         let wake_ready;
+        let sig_ready;
         {
             let mut fds = [
                 PollFd::new(read_guard.connection_fd(), PollFlags::POLLIN),
-                PollFd::new(wake_reader.as_fd(), PollFlags::POLLIN),
+                PollFd::new(wake.as_fd(), PollFlags::POLLIN),
+                PollFd::new(sigfd.as_fd(), PollFlags::POLLIN),
             ];
             poll(&mut fds, PollTimeout::NONE).map_err(|e| format!("poll: {e}"))?;
             wayland_ready = fds[0]
@@ -196,6 +209,10 @@ pub fn run(config: &Config) -> Result<(), String> {
                 .revents()
                 .unwrap_or_else(PollFlags::empty)
                 .contains(PollFlags::POLLIN);
+            sig_ready = fds[2]
+                .revents()
+                .unwrap_or_else(PollFlags::empty)
+                .contains(PollFlags::POLLIN);
         }
 
         if wayland_ready {
@@ -203,13 +220,30 @@ pub fn run(config: &Config) -> Result<(), String> {
         }
 
         if wake_ready {
-            drain_wake_socket(&wake_reader);
+            while wake.read().is_ok() {}
             service_control_commands(&command_rx, &mut data);
+        }
+
+        if sig_ready {
+            reap_children(&sigfd);
         }
     }
 
     info!("streamwm exiting");
     Ok(())
+}
+
+/// Drain the SIGCHLD signalfd and reap every exited child with `waitpid`,
+/// preventing zombie accumulation without a dedicated thread per spawn.
+fn reap_children(sigfd: &SignalFd) {
+    while sigfd.read_signal().is_ok() {
+        loop {
+            match waitpid(None, Some(WaitPidFlag::WNOHANG)) {
+                Ok(WaitStatus::StillAlive) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+    }
 }
 
 fn service_control_commands(
@@ -218,21 +252,6 @@ fn service_control_commands(
 ) {
     while let Ok(cmd) = command_rx.try_recv() {
         crate::status::apply_command(data, cmd);
-    }
-}
-
-fn drain_wake_socket(mut wake_reader: &UnixStream) {
-    let mut buf = [0u8; 64];
-    loop {
-        match wake_reader.read(&mut buf) {
-            Ok(0) => break,
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-            Err(e) => {
-                log::warn!("status wake read failed: {e}");
-                break;
-            }
-        }
     }
 }
 
@@ -395,12 +414,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn wake_socket_is_non_blocking() {
-        let (mut reader, writer) = UnixStream::pair().unwrap();
-        reader.set_nonblocking(true).unwrap();
-        writer.set_nonblocking(true).unwrap();
-
-        let mut buf = [0u8; 1];
-        assert!(reader.read(&mut buf).is_err());
+    fn wake_eventfd_is_nonblocking() {
+        let wake = EventFd::from_flags(EfdFlags::EFD_NONBLOCK).unwrap();
+        // Empty eventfd: a read would block, and with EFD_NONBLOCK it errors
+        // instead. Counter stays zero until something is enqueued.
+        assert!(wake.read().is_err());
     }
 }

@@ -11,6 +11,9 @@ use std::process::{Command, Stdio};
 
 /// Spawns an arbitrary command string detached from streamwm.
 /// Automatically selects direct binary execution for simple commands or `$SHELL -c` for shell strings.
+///
+/// Children are reaped by the main loop's SIGCHLD signalfd (see
+/// `connection::run`), so no per-spawn thread is needed here.
 pub fn spawn(command: &str) {
     log::info!("spawn: {command}");
     let started = if let Some(args) = direct_command_args(command) {
@@ -21,13 +24,7 @@ pub fn spawn(command: &str) {
     };
 
     match started {
-        Ok(mut child) => {
-            // Reap the child in a background thread so it doesn't linger as a
-            // zombie; streamwm stays responsive while the command runs.
-            std::thread::spawn(move || {
-                let _ = child.wait();
-            });
-        }
+        Ok(_child) => {} // detached; reaped via SIGCHLD signalfd
         Err(e) => log::error!("spawn failed for `{command}`: {e}"),
     }
 }
