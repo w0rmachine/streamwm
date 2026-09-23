@@ -20,7 +20,7 @@ decorations.
   (`←`/`→`, or `h`/`l`), `Escape` to leave.
 - **Floating windows** (toggle with `Mod+v`): drag with `Mod`+left-button,
   resize with `Mod`+right-button.
-- **Lid-switch / clamshell** handling via ACPI/sysfs polling, switching kanshi
+- **Lid-switch / clamshell** handling via logind's `LidClosed` signal (D-Bus) and DRM topology polling, switching kanshi
   profiles on open/close and recovering the internal panel after undocking.
 - **Status/control** over a JSON Unix socket
   (`$XDG_RUNTIME_DIR/streamwm-<display>.sock`), exposing focused output,
@@ -80,7 +80,8 @@ master_fraction = 0.55   # master window width fraction (0.1..=0.9)
 resize_step = 0.05       # amount changed per resize-mode arrow key
 ```
 
-When lid handling is enabled, the session should hold logind's low-level
-`handle-lid-switch` inhibitor. This prevents unplugging a dock with the lid
-closed from suspending the machine before streamwm can switch outputs. The
-session remains responsible for its desired suspend policy.
+When lid handling is enabled, streamwm itself takes logind's low-level
+`handle-lid-switch` inhibitor over D-Bus and reads lid state from logind's
+`LidClosed` property. This prevents unplugging a dock with the lid closed from
+suspending the machine before streamwm can switch outputs. The session remains
+responsible for its desired suspend policy.

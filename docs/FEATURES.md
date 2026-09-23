@@ -73,9 +73,10 @@ River enforces a strict protocol state split:
 - Enables status bars (Waybar, Quickshell), launchers (Rofi, Fuzzel), and desktop wallpaper daemons (swaybg, hyprpaper).
 - Dynamically respects `NonExclusiveArea` updates from status bars, recalculating usable screen area for window tiling.
 
-### ACPI Lid-Switch & Display Topology Monitoring (`src/lid.rs`)
-- Background polling thread watching `/proc/acpi/button/lid/LID0/state` and DRM connectors in `/sys/class/drm`.
-- Independent of `logind` suspend policies.
+### Lid-Switch & Display Topology Monitoring (`src/lid.rs`)
+- Lid state sourced from logind's `org.freedesktop.login1.Manager.LidClosed` property over D-Bus (event-driven, via `zbus`), replacing the former `/proc/acpi` poll.
+- Holds logind's `handle-lid-switch` inhibitor for the session lifetime.
+- DRM connector topology still read from `/sys/class/drm`.
 - Automatically switches `kanshi` display output profiles on lid open/close, dock connection, or laptop undocking.
 - Includes debounced DRM connector recovery (`wlr-randr --output <internal> --on --preferred`) to recover laptop screens after dock unplugging.
 

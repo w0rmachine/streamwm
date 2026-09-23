@@ -1,29 +1,35 @@
 //! Lid-switch / clamshell handling.
 //!
-//! Switches kanshi output profiles when the laptop lid opens or closes. The
-//! previous implementation listened to logind's `PrepareForSleep` signal, but
-//! that only fires when the machine actually suspends — closing the lid in a
-//! docked clamshell setup (where `HandleLidSwitchDocked=ignore`) produced no
-//! event at all.
+//! Switches kanshi output profiles when the laptop lid opens or closes. Lid
+//! state comes from logind (`org.freedesktop.login1.Manager`) over D-Bus
+//! rather than polling `/proc/acpi`: the `LidClosed` property and
+//! `PrepareForSleep` signal are event-driven and fire regardless of logind's
+//! suspend policy, which a procfs poll would miss on docked clamshell setups.
 //!
-//! Instead we poll the ACPI lid state file (`/proc/acpi/button/lid/LID0/state`,
-//! with a `LID` fallback) and react to open<->closed _transitions_. This is
-//! simple, dependency-free, and works regardless of logind's suspend policy.
+//! streamwm additionally holds logind's `handle-lid-switch` inhibitor so an
+//! unplug-with-lid-closed does not suspend the machine before profiles can be
+//! switched. DRM connector topology (for undock recovery) is still read from
+//! `/sys/class/drm`, and kanshi/wlr-randr remain the profile/panel drivers —
+//! logind owns lid state, not display profiles.
 
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use zbus::blocking::{Connection, Proxy};
+
 use crate::config::Lid;
 
-/// Poll interval for the lid state file.
+/// Poll interval for the DRM topology file. Lid *state* is event-driven via
+/// logind; only output topology (which logind does not report) is polled.
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
-/// Delay after the lid opens before switching kanshi. The ACPI "open" state
-/// fires before the panel's DRM connector comes back up, so switching
-/// immediately makes kanshi apply the profile while the panel is still
-/// "disconnected" and leave it disabled.
+/// Delay after the lid opens before switching kanshi. The panel reports
+/// "open" before its DRM connector comes back up, so switching immediately
+/// makes kanshi apply the profile while the panel is still "disconnected"
+/// and leave it disabled.
 const OPEN_DEBOUNCE: Duration = Duration::from_millis(1500);
 /// Additional wait before a retry switch, to catch the race where kanshi
 /// applies the open profile before the panel is ready.
@@ -37,27 +43,94 @@ const UNDOCKED_RECOVERY_INTERVAL: Duration = Duration::from_secs(30);
 /// sufficient even though sysfs already reports the panel as connected.
 const UNDOCKED_RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(2), Duration::from_secs(5)];
 
-/// Spawn a background thread that watches lid open/close transitions and
-/// switches kanshi profiles accordingly.
+/// Lid state delivered from the logind listener thread to the
+/// topology/profile thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LidEvent {
+    /// Logind reports the lid is now closed (`true`) or open (`false`).
+    Closed(bool),
+}
+
+const LOGIND_DEST: &str = "org.freedesktop.login1";
+const LOGIND_PATH: &str = "/org/freedesktop/login1";
+const LOGIND_IFACE: &str = "org.freedesktop.login1.Manager";
+
+/// Spawn the logind lid listener and the topology/profile threads.
 pub fn spawn(config: Lid) {
     if !config.enable {
         return;
     }
+
+    let (lid_tx, lid_rx) = mpsc::channel::<LidEvent>();
+
     thread::spawn(move || {
-        if let Err(e) = run(&config) {
+        if let Err(e) = logind_listener(lid_tx) {
+            log::error!("logind lid listener error: {e}");
+        }
+    });
+
+    thread::spawn(move || {
+        if let Err(e) = run(&config, lid_rx) {
             log::error!("lid listener error: {e}");
         }
     });
 }
 
-/// Polling event loop that tracks ACPI lid state transitions and DRM connector topology changes.
-fn run(config: &Lid) -> Result<(), Box<dyn std::error::Error>> {
-    log::info!("lid listener: polling ACPI lid state");
+/// Connect to logind, hold the `handle-lid-switch` inhibitor for the lifetime
+/// of the connection, and forward `LidClosed` transitions to `tx`. Blocks
+/// until the connection drops (event-driven, no polling).
+fn logind_listener(tx: mpsc::Sender<LidEvent>) -> Result<(), Box<dyn std::error::Error>> {
+    let conn = Connection::system()?;
+    let proxy = Proxy::new(&conn, LOGIND_DEST, LOGIND_PATH, LOGIND_IFACE)?;
 
-    // Keep the previous state to distinguish startup from later transitions.
-    // Startup is deliberately handled as a topology event: a session may begin
-    // with the lid already closed, in which case waiting for a transition would
-    // leave Kanshi on an arbitrary profile indefinitely.
+    // Hold the handle-lid-switch inhibitor. zbus represents the returned `h`
+    // as an OwnedFd; keeping `_inhibitor` alive keeps the lock held. It is
+    // released automatically when the connection closes.
+    let _inhibitor = inhibit_lid_switch(&proxy);
+
+    // Forward the current lid state as the initial event, then stream
+    // subsequent transitions from logind's `LidClosed` property. Unlike the
+    // old PrepareForSleep approach, `LidClosed` fires on docked-clamshell
+    // transitions as well as plain suspend.
+    if let Ok(closed) = proxy.get_property::<bool>("LidClosed") {
+        let _ = tx.send(LidEvent::Closed(closed));
+    }
+
+    for change in proxy.receive_property_changed::<bool>("LidClosed") {
+        if change.name() == "LidClosed" {
+            if let Ok(closed) = change.get() {
+                if tx.send(LidEvent::Closed(closed)).is_err() {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Ask logind to take the `handle-lid-switch` inhibitor, returning the fd that
+/// must be held open for the inhibition to stay active.
+fn inhibit_lid_switch(proxy: &Proxy<'_>) -> Option<zbus::zvariant::OwnedFd> {
+    match proxy.call_method(
+        "Inhibit",
+        &("handle-lid-switch", "streamwm", "lid profile switching", "block"),
+    ) {
+        Ok(reply) => reply.body().deserialize().ok(),
+        Err(e) => {
+            log::warn!("could not take logind handle-lid-switch inhibitor: {e}");
+            None
+        }
+    }
+}
+
+/// Topology/profile reaction loop. Reads DRM topology on an interval and
+/// consumes lid-state events from logind.
+fn run(
+    config: &Lid,
+    lid_rx: mpsc::Receiver<LidEvent>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    log::info!("lid listener: using logind lid state, polling DRM topology");
+
     let mut prev_lid_closed: Option<bool> = None;
     let mut prev_topology: Option<DisplayTopology> = None;
     let mut last_undocked_recovery = Instant::now()
@@ -66,7 +139,11 @@ fn run(config: &Lid) -> Result<(), Box<dyn std::error::Error>> {
     let mut undocked_retry: Option<(usize, Instant)> = None;
 
     loop {
-        let closed = lid_is_closed()?;
+        let closed = match latest_lid_event(lid_rx.try_iter()) {
+            Some(ev) => ev,
+            None => prev_lid_closed.unwrap_or(false),
+        };
+
         let topology = display_topology(&config.internal_output);
 
         let initial_state = prev_topology.is_none();
@@ -79,9 +156,6 @@ fn run(config: &Lid) -> Result<(), Box<dyn std::error::Error>> {
                 if closed {
                     apply_closed_profile(config, topology, "lid closed")?;
                 } else {
-                    // Reopening: wait for the panel to reconnect, switch, then
-                    // retry once to catch the race where kanshi applies the
-                    // profile before the panel is ready.
                     thread::sleep(OPEN_DEBOUNCE);
                     recover_open_outputs(config, display_topology(&config.internal_output))?;
                     thread::sleep(OPEN_RETRY_DELAY);
@@ -131,6 +205,15 @@ fn run(config: &Lid) -> Result<(), Box<dyn std::error::Error>> {
 
         thread::sleep(POLL_INTERVAL);
     }
+}
+
+/// Consume all pending lid events and return the final `Closed` state.
+fn latest_lid_event(events: mpsc::TryIter<'_, LidEvent>) -> Option<bool> {
+    let mut closed = None;
+    for LidEvent::Closed(c) in events {
+        closed = Some(c);
+    }
+    closed
 }
 
 /// Apply the profile matching the current lid state and connector topology.
@@ -272,27 +355,6 @@ fn run_command(program: &str, args: &[&str]) -> bool {
     }
 }
 
-/// Read the current lid state from `/proc/acpi/button/lid/LID0/state` (or `LID/state`).
-fn lid_is_closed() -> Result<bool, Box<dyn std::error::Error>> {
-    for path in [
-        "/proc/acpi/button/lid/LID0/state",
-        "/proc/acpi/button/lid/LID/state",
-    ] {
-        if let Ok(text) = std::fs::read_to_string(path) {
-            let lower = text.to_ascii_lowercase();
-            if lower.contains("closed") {
-                return Ok(true);
-            }
-            if lower.contains("open") {
-                return Ok(false);
-            }
-        }
-    }
-    // If the lid state file is unavailable, treat the lid as open. Returning an
-    // error would kill the listener; a missing procfs entry is not fatal.
-    Ok(false)
-}
-
 /// State representation of connected display outputs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DisplayTopology {
@@ -394,5 +456,13 @@ mod tests {
 
         assert!(clamshell_available(external));
         assert!(!clamshell_available(internal_only));
+    }
+
+    #[test]
+    fn latest_lid_event_returns_last_closed_state() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(LidEvent::Closed(true)).unwrap();
+        tx.send(LidEvent::Closed(false)).unwrap();
+        assert_eq!(latest_lid_event(rx.try_iter()), Some(false));
     }
 }
