@@ -14,7 +14,6 @@
 
 use std::fs;
 use std::path::Path;
-use std::os::unix::process::CommandExt;
 use std::process::Command;
 use std::sync::mpsc;
 use std::thread;
@@ -334,7 +333,7 @@ fn switch_kanshi_profile(profile: &str) -> bool {
 
 /// Execute an external CLI command synchronously and return true if exit status was success.
 fn run_command(program: &str, args: &[&str]) -> bool {
-    match unsafe { Command::new(program).args(args).pre_exec(unblock_sigchld).output() } {
+    match Command::new(program).args(args).output() {
         Ok(output) if output.status.success() => true,
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -401,15 +400,6 @@ fn connector_is_connected(path: &Path) -> bool {
     fs::read_to_string(path.join("status"))
         .map(|status| status.trim() == "connected")
         .unwrap_or(false)
-}
-
-fn unblock_sigchld() -> std::io::Result<()> {
-    use nix::sys::signal::{SigSet, SigmaskHow, Signal, pthread_sigmask};
-
-    let mut set = SigSet::empty();
-    set.add(Signal::SIGCHLD);
-    pthread_sigmask(SigmaskHow::SIG_UNBLOCK, Some(&set), None)
-        .map_err(|e| std::io::Error::from_raw_os_error(e as i32))
 }
 
 fn drm_output_name(card_name: &str) -> Option<&str> {

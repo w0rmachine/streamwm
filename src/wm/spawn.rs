@@ -7,13 +7,13 @@
 //! Spawns child processes detached with null stdio handles and reaps exited children
 //! on dedicated background threads to prevent zombie process leakage.
 
-use std::process::{Command, Stdio};
+use std::{process::{Command, Stdio}, thread};
 
 /// Spawns an arbitrary command string detached from streamwm.
 /// Automatically selects direct binary execution for simple commands or `$SHELL -c` for shell strings.
 ///
-/// Children are reaped by the main loop's SIGCHLD signalfd (see
-/// `connection::run`), so no per-spawn thread is needed here.
+/// Children are reaped by a background thread so streamwm's other synchronous
+/// child processes cannot lose their wait handles.
 pub fn spawn(command: &str) {
     log::info!("spawn: {command}");
     let started = if let Some(args) = direct_command_args(command) {
@@ -24,7 +24,11 @@ pub fn spawn(command: &str) {
     };
 
     match started {
-        Ok(_child) => {} // detached; reaped via SIGCHLD signalfd
+        Ok(mut child) => {
+            thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
         Err(e) => log::error!("spawn failed for `{command}`: {e}"),
     }
 }

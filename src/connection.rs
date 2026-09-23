@@ -11,9 +11,6 @@ use std::sync::Arc;
 use log::info;
 use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 use nix::sys::eventfd::{EfdFlags, EventFd};
-use nix::sys::signal::{SigSet, Signal};
-use nix::sys::signalfd::SignalFd;
-use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use wayland_client::{
     delegate_noop,
     globals::registry_queue_init,
@@ -163,16 +160,6 @@ pub fn run(config: &Config) -> Result<(), String> {
     data.snapshot = Some(snapshot);
     data.subscribers = Some(subscribers);
 
-    // Reap children via SIGCHLD instead of a thread per spawned process.
-    let mut sigset = SigSet::empty();
-    sigset.add(Signal::SIGCHLD);
-    // Block SIGCHLD in this thread so it is delivered to the signalfd rather
-    // than interrupting poll; the fd becomes readable when a child exits.
-    nix::sys::signal::pthread_sigmask(nix::sys::signal::SigmaskHow::SIG_BLOCK, Some(&sigset), None)
-        .map_err(|e| format!("block SIGCHLD: {e}"))?;
-    let sigfd = SignalFd::with_flags(&sigset, nix::sys::signalfd::SfdFlags::SFD_NONBLOCK)
-        .map_err(|e| format!("signalfd: {e}"))?;
-
     info!("streamwm connected; entering event loop");
 
     loop {
@@ -195,12 +182,10 @@ pub fn run(config: &Config) -> Result<(), String> {
 
         let wayland_ready;
         let wake_ready;
-        let sig_ready;
         {
             let mut fds = [
                 PollFd::new(read_guard.connection_fd(), PollFlags::POLLIN),
                 PollFd::new(wake.as_fd(), PollFlags::POLLIN),
-                PollFd::new(sigfd.as_fd(), PollFlags::POLLIN),
             ];
             poll(&mut fds, PollTimeout::NONE).map_err(|e| format!("poll: {e}"))?;
             wayland_ready = fds[0]
@@ -208,10 +193,6 @@ pub fn run(config: &Config) -> Result<(), String> {
                 .unwrap_or_else(PollFlags::empty)
                 .intersects(PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR);
             wake_ready = fds[1]
-                .revents()
-                .unwrap_or_else(PollFlags::empty)
-                .contains(PollFlags::POLLIN);
-            sig_ready = fds[2]
                 .revents()
                 .unwrap_or_else(PollFlags::empty)
                 .contains(PollFlags::POLLIN);
@@ -225,36 +206,10 @@ pub fn run(config: &Config) -> Result<(), String> {
             while wake.read().is_ok() {}
             service_control_commands(&command_rx, &mut data);
         }
-
-        if sig_ready {
-            reap_children(&sigfd);
-        }
     }
 
     info!("streamwm exiting");
     Ok(())
-}
-
-/// Drain the SIGCHLD signalfd and reap every exited child with `waitpid`,
-/// preventing zombie accumulation without a dedicated thread per spawn.
-fn reap_children(sigfd: &SignalFd) {
-    while sigfd.read_signal().is_ok() {
-        reap_one_round();
-    }
-}
-
-fn reap_one_round() {
-    loop {
-        match waitpid(None, Some(WaitPidFlag::WNOHANG)) {
-            Ok(WaitStatus::StillAlive) => break,
-            Err(nix::errno::Errno::ECHILD) => break,
-            Err(e) => {
-                log::warn!("reap child failed: {e}");
-                break;
-            }
-            Ok(_) => {}
-        }
-    }
 }
 
 fn service_control_commands(
