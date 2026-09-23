@@ -171,18 +171,13 @@ impl Dispatch<RiverWindowV1, ()> for AppData {
                 }
             }
             WindowEvent::MaximizeRequested => {
-                // A tiling WM's maximize equals filling the output, i.e.
-                // fullscreen; honor it and inform the app in on_manage_start.
-                if let Some(w) = state.find_window_mut(id) {
-                    w.fullscreen = true;
-                    needs_manage = true;
-                }
+                // A tiling WM already fills each window's tile, so there is no
+                // distinct "maximize" state; mapping it to fullscreen makes
+                // apps that eagerly send maximize_requested unexpectedly cover
+                // the whole output (and other tags). Ignore it.
             }
             WindowEvent::UnmaximizeRequested => {
-                if let Some(w) = state.find_window_mut(id) {
-                    w.fullscreen = false;
-                    needs_manage = true;
-                }
+                // Ignored for the same reason: no tiling "maximize" state.
             }
             WindowEvent::MinimizeRequested => {
                 // Hide the window until it is interacted with again; streamwm

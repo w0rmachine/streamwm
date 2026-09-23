@@ -499,6 +499,12 @@ impl State {
         let old = self.outputs[output_idx].active_tag;
         self.outputs[output_idx].active_tag = tag;
         if old != tag {
+            // A window left fullscreen on the now-inactive tag must not stay
+            // fullscreen: river draws a fullscreen window over everything,
+            // which would make two tags' windows appear merged.
+            for w in self.windows.iter_mut().filter(|w| w.tag == old) {
+                w.fullscreen = false;
+            }
             self.delete_tag_if_empty(output_idx, old);
         }
         self.refocus_output(output_idx);
