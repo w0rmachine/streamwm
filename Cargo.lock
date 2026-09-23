@@ -864,7 +864,7 @@ checksum = "ba467056f1b547ed52077911161fc86985becbc60e8e1857c8a144dab0def891"
 
 [[package]]
 name = "streamwm"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bitflags 2.13.2",
  "env_logger",
