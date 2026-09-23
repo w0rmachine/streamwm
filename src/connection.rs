@@ -241,7 +241,12 @@ fn reap_children(sigfd: &SignalFd) {
     while sigfd.read_signal().is_ok() {
         loop {
             match waitpid(None, Some(WaitPidFlag::WNOHANG)) {
-                Ok(WaitStatus::StillAlive) | Err(_) => break,
+                Ok(WaitStatus::StillAlive) => break,
+                Err(nix::errno::Errno::ECHILD) => break,
+                Err(e) => {
+                    log::warn!("reap child failed: {e}");
+                    break;
+                }
                 Ok(_) => {}
             }
         }

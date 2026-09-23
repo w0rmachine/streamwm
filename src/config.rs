@@ -40,8 +40,8 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub focus_follows_mouse: bool,
 
-    /// Whether to request server-side decorations (SSD titlebars) from client windows (`true` by default).
-    #[serde(default = "default_true")]
+    /// Whether to request server-side decorations (SSD titlebars) from client windows (`false` by default).
+    #[serde(default)]
     pub use_ssd: bool,
 
     /// Custom user keybindings declaration list.
@@ -194,7 +194,7 @@ impl Default for Config {
             border_color: default_border_color(),
             focused_border_color: default_focused_border_color(),
             focus_follows_mouse: true,
-            use_ssd: true,
+            use_ssd: false,
             bindings: vec![],
             lid: Lid::default(),
             allow_spawn: false,
