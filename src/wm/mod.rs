@@ -69,9 +69,8 @@ pub fn on_manage_start(data: &mut AppData, wm: &RiverWindowManagerV1) {
                 // (mapped to fullscreen), fullscreen, and minimize (hide); we
                 // do not show a window menu.
                 use crate::protocols::wm::river_window_v1::Capabilities;
-                let caps = Capabilities::Maximize
-                    | Capabilities::Fullscreen
-                    | Capabilities::Minimize;
+                let caps =
+                    Capabilities::Maximize | Capabilities::Fullscreen | Capabilities::Minimize;
                 w.proxy.set_capabilities(caps);
                 w.caps_set = true;
             }
@@ -141,6 +140,7 @@ pub fn on_manage_start(data: &mut AppData, wm: &RiverWindowManagerV1) {
         let state = data.state.borrow();
         layout::compute_all(&state, &data.config)
     };
+    let tiled_ids: std::collections::HashSet<u32> = geometries.iter().map(|(id, _)| *id).collect();
 
     {
         let mut state = data.state.borrow_mut();
@@ -150,13 +150,21 @@ pub fn on_manage_start(data: &mut AppData, wm: &RiverWindowManagerV1) {
                 continue;
             }
             if let Some(window) = state.find_window_mut(wid) {
-                if window.proposed_dimensions == Some((geom.width, geom.height)) {
+                let (w, h) = clamp_to_hints(
+                    geom.width,
+                    geom.height,
+                    window.min_width,
+                    window.min_height,
+                    window.max_width,
+                    window.max_height,
+                );
+                if window.proposed_dimensions == Some((w, h)) {
                     continue;
                 }
-                window
-                    .proxy
-                    .propose_dimensions(geom.width as i32, geom.height as i32);
-                window.proposed_dimensions = Some((geom.width, geom.height));
+                window.proxy.propose_dimensions(w as i32, h as i32);
+                window.proposed_dimensions = Some((w, h));
+                // Recommend the tiling cell as the app's maximum size.
+                window.proxy.set_dimension_bounds(w as i32, h as i32);
                 proposed += 1;
             }
         }
@@ -164,17 +172,44 @@ pub fn on_manage_start(data: &mut AppData, wm: &RiverWindowManagerV1) {
         // by interactive resize).
         for window in state.windows.iter_mut().filter(|w| w.floating) {
             if window.float_w > 0 && window.float_h > 0 {
-                if window.proposed_dimensions == Some((window.float_w, window.float_h)) {
+                let (w, h) = clamp_to_hints(
+                    window.float_w,
+                    window.float_h,
+                    window.min_width,
+                    window.min_height,
+                    window.max_width,
+                    window.max_height,
+                );
+                if window.proposed_dimensions == Some((w, h)) {
                     continue;
                 }
-                window
-                    .proxy
-                    .propose_dimensions(window.float_w as i32, window.float_h as i32);
-                window.proposed_dimensions = Some((window.float_w, window.float_h));
+                window.proxy.propose_dimensions(w as i32, h as i32);
+                window.proposed_dimensions = Some((w, h));
                 proposed += 1;
             }
         }
         log::debug!("manage proposed {proposed} window dimensions");
+    }
+
+    // Inform windows of their tiled state so CSD can suppress drop shadows on
+    // tiled edges. Tiled windows report all edges (they sit in the layout);
+    // floating windows report none.
+    {
+        use crate::protocols::wm::river_window_v1::Edges;
+        let mut state = data.state.borrow_mut();
+        for w in state.windows.iter_mut() {
+            let is_tiled = tiled_ids.contains(&w.id);
+            if w.tiled_applied == Some(is_tiled) {
+                continue;
+            }
+            let edges = if is_tiled {
+                Edges::Top | Edges::Bottom | Edges::Left | Edges::Right
+            } else {
+                Edges::empty()
+            };
+            w.proxy.set_tiled(edges);
+            w.tiled_applied = Some(is_tiled);
+        }
     }
 
     // Enable keybindings that were created before this manage sequence.
@@ -215,6 +250,32 @@ pub fn on_manage_start(data: &mut AppData, wm: &RiverWindowManagerV1) {
     log::debug!("manage_start finished in {:?}", started.elapsed());
 }
 
+/// Clamp proposed dimensions to the app's preferred min/max (`dimensions_hint`
+/// values), treating 0 as "no preference".
+fn clamp_to_hints(
+    width: u32,
+    height: u32,
+    min_width: u32,
+    min_height: u32,
+    max_width: u32,
+    max_height: u32,
+) -> (u32, u32) {
+    let clamp_dim = |v: u32, min: u32, max: u32| -> u32 {
+        let mut out = v;
+        if min > 0 {
+            out = out.max(min);
+        }
+        if max > 0 {
+            out = out.min(max);
+        }
+        out
+    };
+    (
+        clamp_dim(width, min_width, max_width),
+        clamp_dim(height, min_height, max_height),
+    )
+}
+
 /// Handle a render sequence: ensure nodes exist, position windows, set
 /// borders, and hide/show.
 pub fn on_render_start(data: &mut AppData, wm: &RiverWindowManagerV1) {
@@ -251,4 +312,25 @@ pub fn on_render_start(data: &mut AppData, wm: &RiverWindowManagerV1) {
     // Refresh the status snapshot for the socket server.
     crate::status::refresh_snapshot(data);
     log::debug!("render_start finished in {:?}", started.elapsed());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clamp_to_hints_respects_min_max_and_zero_preference() {
+        // No hints (all zero) -> unchanged.
+        assert_eq!(clamp_to_hints(100, 200, 0, 0, 0, 0), (100, 200));
+
+        // Min only.
+        assert_eq!(clamp_to_hints(50, 50, 100, 0, 0, 0), (100, 50));
+
+        // Max only.
+        assert_eq!(clamp_to_hints(500, 50, 0, 0, 300, 0), (300, 50));
+
+        // Both min and max.
+        assert_eq!(clamp_to_hints(400, 300, 200, 200, 800, 600), (400, 300));
+        assert_eq!(clamp_to_hints(50, 900, 200, 200, 800, 600), (200, 600));
+    }
 }

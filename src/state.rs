@@ -46,6 +46,8 @@ pub struct Window {
     pub id: u32,
     /// Global tag index this window is attached to (0..=NUM_TAGS-1).
     pub tag: usize,
+    /// Streamwm id of this window's parent/transient (dialog), if any.
+    pub parent: Option<u32>,
     /// Client application ID (e.g. `"alacritty"`, `"firefox"`).
     pub app_id: Option<String>,
     /// Current window title text.
@@ -64,6 +66,11 @@ pub struct Window {
     pub width: u32,
     /// Last reported content height from `RiverWindowV1.dimensions`.
     pub height: u32,
+    /// Preferred min/max dimensions from `dimensions_hint` (0 = no preference).
+    pub min_width: u32,
+    pub min_height: u32,
+    pub max_width: u32,
+    pub max_height: u32,
     /// Desired fullscreen state flag.
     pub fullscreen: bool,
     /// True if fullscreen request has been sent to River.
@@ -74,6 +81,8 @@ pub struct Window {
     pub ssd_applied: Option<bool>,
     /// Whether `set_capabilities` has been sent for this window yet.
     pub caps_set: bool,
+    /// Last `set_tiled` state sent (Some(true) = tiled, Some(false) = not).
+    pub tiled_applied: Option<bool>,
     /// Last content dimensions proposed to River compositor.
     pub proposed_dimensions: Option<(u32, u32)>,
     /// Last border configuration sent to River: (focused, width, r, g, b).
@@ -89,6 +98,7 @@ impl Window {
             id: NEXT_WINDOW_ID.fetch_add(1, Ordering::Relaxed),
             proxy,
             tag,
+            parent: None,
             app_id: None,
             title: None,
             floating: false,
@@ -98,11 +108,16 @@ impl Window {
             float_h: 300,
             width: 0,
             height: 0,
+            min_width: 0,
+            min_height: 0,
+            max_width: 0,
+            max_height: 0,
             fullscreen: false,
             fullscreen_applied: false,
             minimized: false,
             ssd_applied: None,
             caps_set: false,
+            tiled_applied: None,
             proposed_dimensions: None,
             border_applied: None,
             node: None,

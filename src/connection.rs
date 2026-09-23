@@ -94,6 +94,8 @@ pub struct PointerOp {
     pub start_w: u32,
     /// Window float height at operation start.
     pub start_h: u32,
+    /// Which edges are being resized (for `OpKind::Resize`); empty for Move.
+    pub edges: crate::protocols::wm::river_window_v1::Edges,
     /// Wayland seat proxy controlling the operation.
     pub seat: crate::protocols::wm::river_seat_v1::RiverSeatV1,
 }

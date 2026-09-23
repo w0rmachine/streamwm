@@ -30,6 +30,43 @@ impl Dispatch<RiverWindowV1, ()> for AppData {
     ) {
         let oid = window.id();
         let mut needs_manage = false;
+
+        // Interactive move/resize requests mutate op + float state through
+        // `start_interactive_op`, which needs `&mut data`; handle them before
+        // taking the general `state` borrow.
+        match &event {
+            WindowEvent::PointerMoveRequested { seat } => {
+                let wid = data.state.borrow().find_window_by_proxy(window);
+                if let Some(wid) = wid {
+                    crate::bindings::start_interactive_op(
+                        data,
+                        wid,
+                        seat.clone(),
+                        crate::connection::OpKind::Move,
+                        crate::protocols::wm::river_window_v1::Edges::empty(),
+                    );
+                }
+                return;
+            }
+            WindowEvent::PointerResizeRequested { seat, edges } => {
+                let wid = data.state.borrow().find_window_by_proxy(window);
+                if let Some(wid) = wid {
+                    let edges = edges
+                        .into_result()
+                        .unwrap_or_else(|_| crate::protocols::wm::river_window_v1::Edges::empty());
+                    crate::bindings::start_interactive_op(
+                        data,
+                        wid,
+                        seat.clone(),
+                        crate::connection::OpKind::Resize,
+                        edges,
+                    );
+                }
+                return;
+            }
+            _ => {}
+        }
+
         let mut state = data.state.borrow_mut();
         let Some(id) = state.find_window_by_proxy(window) else {
             return;
@@ -76,6 +113,45 @@ impl Dispatch<RiverWindowV1, ()> for AppData {
                 if let Some(w) = state.find_window_mut(id) {
                     w.width = width as u32;
                     w.height = height as u32;
+                }
+            }
+            WindowEvent::DimensionsHint {
+                min_width,
+                min_height,
+                max_width,
+                max_height,
+            } => {
+                // Store the app's preferred min/max so propose_dimensions can
+                // clamp to them in on_manage_start.
+                if let Some(w) = state.find_window_mut(id) {
+                    w.min_width = min_width.max(0) as u32;
+                    w.min_height = min_height.max(0) as u32;
+                    w.max_width = max_width.max(0) as u32;
+                    w.max_height = max_height.max(0) as u32;
+                }
+            }
+            WindowEvent::Parent { parent } => {
+                // A transient (dialog/file picker) set a parent. Record it and
+                // float the child over the parent if the parent is floating, so
+                // dialogs stay grouped with their owner instead of tiling flat.
+                let parent_geom = parent.as_ref().and_then(|p| {
+                    let pid = p.id();
+                    state
+                        .windows
+                        .iter()
+                        .find(|w| w.proxy.id() == pid)
+                        .map(|w| (w.id, w.floating, w.float_x, w.float_y, w.float_w, w.float_h))
+                });
+                if let Some(w) = state.find_window_mut(id) {
+                    w.parent = parent_geom.as_ref().map(|(pid, ..)| *pid);
+                    if let Some((_, floating, px, py, pw, ph)) = parent_geom {
+                        if floating && !w.floating {
+                            // Center the dialog over its floating parent.
+                            w.floating = true;
+                            w.float_x = px + pw as i32 / 2 - w.float_w as i32 / 2;
+                            w.float_y = py + ph as i32 / 2 - w.float_h as i32 / 2;
+                        }
+                    }
                 }
             }
             WindowEvent::FullscreenRequested { .. } => {

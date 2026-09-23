@@ -492,6 +492,13 @@ fn start_pointer_op(
         OpKind::Resize
     };
 
+    let edges = if kind == OpKind::Resize {
+        crate::protocols::wm::river_window_v1::Edges::Bottom
+            | crate::protocols::wm::river_window_v1::Edges::Right
+    } else {
+        crate::protocols::wm::river_window_v1::Edges::empty()
+    };
+
     // Defer op_start_pointer to the manage sequence (it modifies window
     // management state).
     data.pending_op = Some(PointerOp {
@@ -503,6 +510,78 @@ fn start_pointer_op(
         start_float_y: fy,
         start_w: fw,
         start_h: fh,
+        edges,
+        seat,
+    });
+    if let Some(wm) = &data.wm {
+        wm.manage_dirty();
+    }
+}
+
+/// Start an interactive move/resize requested by a window itself (e.g. a
+/// client-side titlebar drag) rather than a pointer binding. Floats the window
+/// first, seeding its geometry from its current tiling cell, then stages the
+/// op to run in the next manage sequence.
+pub fn start_interactive_op(
+    data: &mut AppData,
+    wid: u32,
+    seat: crate::protocols::wm::river_seat_v1::RiverSeatV1,
+    kind: OpKind,
+    edges: crate::protocols::wm::river_window_v1::Edges,
+) {
+    // Float the window, seeding geometry from its current tiling cell so a
+    // titlebar drag on a tiled window does not teleport it to the origin.
+    {
+        let config = data.config.clone();
+        let geom = {
+            let state = data.state.borrow();
+            crate::wm::layout::compute_all(&state, config.as_ref())
+                .into_iter()
+                .find(|(id, _)| *id == wid)
+                .map(|(_, g)| g)
+        };
+        let mut state = data.state.borrow_mut();
+        if let Some(w) = state.find_window_mut(wid) {
+            if !w.floating {
+                if let Some(g) = geom {
+                    w.float_x = g.x;
+                    w.float_y = g.y;
+                    w.float_w = g.width;
+                    w.float_h = g.height;
+                }
+                w.floating = true;
+            }
+        }
+    }
+
+    // Anchor the op at the seat's current pointer position and the window's
+    // float geometry.
+    let (px, py, fx, fy, fw, fh) = {
+        let state = data.state.borrow();
+        let seat_pos = state
+            .seats
+            .iter()
+            .find(|s| s.proxy.id() == seat.id())
+            .map(|s| (s.pointer_x, s.pointer_y))
+            .unwrap_or((0, 0));
+        match state.find_window(wid) {
+            Some(w) => (
+                seat_pos.0, seat_pos.1, w.float_x, w.float_y, w.float_w, w.float_h,
+            ),
+            None => return,
+        }
+    };
+
+    data.pending_op = Some(PointerOp {
+        window: wid,
+        kind,
+        start_x: px,
+        start_y: py,
+        start_float_x: fx,
+        start_float_y: fy,
+        start_w: fw,
+        start_h: fh,
+        edges,
         seat,
     });
     if let Some(wm) = &data.wm {
@@ -515,7 +594,7 @@ pub fn apply_pointer_delta(data: &mut AppData, dx: i32, dy: i32) {
     let Some(op) = data.pointer_op.as_ref() else {
         return;
     };
-    let (window, kind, sx, sy, sfx, sfy, sw, sh) = (
+    let (window, kind, sx, sy, sfx, sfy, sw, sh, edges) = (
         op.window,
         op.kind,
         op.start_x,
@@ -524,6 +603,7 @@ pub fn apply_pointer_delta(data: &mut AppData, dx: i32, dy: i32) {
         op.start_float_y,
         op.start_w,
         op.start_h,
+        op.edges,
     );
 
     let mut state = data.state.borrow_mut();
@@ -536,10 +616,32 @@ pub fn apply_pointer_delta(data: &mut AppData, dx: i32, dy: i32) {
             w.float_y = sfy + (dy - sy);
         }
         OpKind::Resize => {
-            let nw = (sw as i32 + (dx - sx)).max(50);
-            let nh = (sh as i32 + (dy - sy)).max(50);
-            w.float_w = nw as u32;
-            w.float_h = nh as u32;
+            use crate::protocols::wm::river_window_v1::Edges;
+            let edx = dx - sx;
+            let edy = dy - sy;
+            // Grow/shrink in the direction of the dragged edge; dragging a
+            // top/left edge also moves the window origin so the opposite
+            // edge stays fixed.
+            let mut nx = sfx;
+            let mut ny = sfy;
+            let mut nw = sw as i32;
+            let mut nh = sh as i32;
+            if edges.contains(Edges::Left) {
+                nx += edx;
+                nw -= edx;
+            } else {
+                nw += edx;
+            }
+            if edges.contains(Edges::Top) {
+                ny += edy;
+                nh -= edy;
+            } else {
+                nh += edy;
+            }
+            w.float_x = nx;
+            w.float_y = ny;
+            w.float_w = nw.max(50) as u32;
+            w.float_h = nh.max(50) as u32;
         }
     }
 }
