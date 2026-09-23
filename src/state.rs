@@ -498,16 +498,34 @@ impl State {
     fn activate_tag(&mut self, output_idx: usize, tag: usize) {
         let old = self.outputs[output_idx].active_tag;
         self.outputs[output_idx].active_tag = tag;
+        self.clear_fullscreen_on_tag(old);
         if old != tag {
-            // A window left fullscreen on the now-inactive tag must not stay
-            // fullscreen: river draws a fullscreen window over everything,
-            // which would make two tags' windows appear merged.
-            for w in self.windows.iter_mut().filter(|w| w.tag == old) {
-                w.fullscreen = false;
-            }
             self.delete_tag_if_empty(output_idx, old);
         }
         self.refocus_output(output_idx);
+    }
+
+    /// Make `tag` the active tag of `output_idx`, clearing fullscreen on any
+    /// windows left on the previously active tag (river keeps a fullscreen
+    /// window drawn over everything, which would merge two tags' windows).
+    /// Used by pointer-driven focus, which bypasses [`activate_tag`].
+    pub fn switch_active_tag(&mut self, output_idx: usize, tag: usize) {
+        if output_idx >= self.outputs.len() {
+            return;
+        }
+        let old = self.outputs[output_idx].active_tag;
+        self.outputs[output_idx].active_tag = tag;
+        if old != tag {
+            self.clear_fullscreen_on_tag(old);
+        }
+        self.refocus_output(output_idx);
+    }
+
+    /// Un-fullscreen every window on `tag` (they are no longer visible).
+    fn clear_fullscreen_on_tag(&mut self, tag: usize) {
+        for w in self.windows.iter_mut().filter(|w| w.tag == tag) {
+            w.fullscreen = false;
+        }
     }
 
     /// Unassign `tag` from `output_idx` if no window is on it anymore.

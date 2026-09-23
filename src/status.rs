@@ -494,7 +494,7 @@ pub fn apply_command(data: &mut crate::connection::AppData, cmd: Command) {
             if let Some((wid, tag)) = target {
                 if let Some(output) = s.tag_owner(tag) {
                     s.focused_output = Some(output);
-                    s.outputs[output].active_tag = tag;
+                    s.switch_active_tag(output, tag);
                     s.outputs[output].focused_window = Some(wid);
                 }
             }

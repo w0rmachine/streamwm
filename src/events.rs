@@ -337,7 +337,7 @@ impl Dispatch<RiverSeatV1, ()> for AppData {
                                 if output < state.outputs.len() {
                                     state.focused_output = Some(output);
                                     state.outputs[output].focused_window = Some(wid);
-                                    state.outputs[output].active_tag = tag;
+                                    state.switch_active_tag(output, tag);
                                 }
                             }
                         }
@@ -361,7 +361,7 @@ impl Dispatch<RiverSeatV1, ()> for AppData {
                             if output < state.outputs.len() {
                                 state.focused_output = Some(output);
                                 state.outputs[output].focused_window = Some(wid);
-                                state.outputs[output].active_tag = tag;
+                                state.switch_active_tag(output, tag);
                             }
                         }
                     }
