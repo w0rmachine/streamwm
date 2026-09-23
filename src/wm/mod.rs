@@ -150,21 +150,24 @@ pub fn on_manage_start(data: &mut AppData, wm: &RiverWindowManagerV1) {
                 continue;
             }
             if let Some(window) = state.find_window_mut(wid) {
-                let (w, h) = clamp_to_hints(
-                    geom.width,
-                    geom.height,
-                    window.min_width,
-                    window.min_height,
-                    window.max_width,
-                    window.max_height,
-                );
-                if window.proposed_dimensions == Some((w, h)) {
+                // Tiled windows fill their cell exactly — never clamp to the
+                // app's min/max hints (those apply to floating resize only).
+                // Fullscreen windows are sized by river, not the tiling cell,
+                // so skip proposing and clear any stale bound so the app is
+                // not constrained after leaving fullscreen.
+                if window.fullscreen {
+                    window.proxy.set_dimension_bounds(0, 0);
                     continue;
                 }
-                window.proxy.propose_dimensions(w as i32, h as i32);
-                window.proposed_dimensions = Some((w, h));
+                if window.proposed_dimensions == Some((geom.width, geom.height)) {
+                    continue;
+                }
+                window
+                    .proxy
+                    .propose_dimensions(geom.width as i32, geom.height as i32);
+                window.proposed_dimensions = Some((geom.width, geom.height));
                 // Recommend the tiling cell as the app's maximum size.
-                window.proxy.set_dimension_bounds(w as i32, h as i32);
+                window.proxy.set_dimension_bounds(geom.width as i32, geom.height as i32);
                 proposed += 1;
             }
         }
@@ -198,7 +201,8 @@ pub fn on_manage_start(data: &mut AppData, wm: &RiverWindowManagerV1) {
         use crate::protocols::wm::river_window_v1::Edges;
         let mut state = data.state.borrow_mut();
         for w in state.windows.iter_mut() {
-            let is_tiled = tiled_ids.contains(&w.id);
+            // Fullscreen windows are not part of the tiling layout.
+            let is_tiled = !w.fullscreen && tiled_ids.contains(&w.id);
             if w.tiled_applied == Some(is_tiled) {
                 continue;
             }
