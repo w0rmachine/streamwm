@@ -220,7 +220,9 @@ pub fn render_all_run(data: &mut AppData) {
 
         // Position via the render node.
         if let Some(node) = &window.node {
-            if let Some(g) = geom {
+            if window.fullscreen {
+                node.set_position(0, 0);
+            } else if let Some(g) = geom {
                 node.set_position(g.x, g.y);
             } else if window.floating {
                 node.set_position(window.float_x, window.float_y);

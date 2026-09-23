@@ -151,9 +151,13 @@ pub fn on_manage_start(data: &mut AppData, wm: &RiverWindowManagerV1) {
                 // so skip proposing and clear any stale bound so the app is
                 // not constrained after leaving fullscreen.
                 if window.fullscreen {
-                    window.proxy.set_dimension_bounds(0, 0);
+                    if window.proposed_dimensions.is_some() {
+                        window.proxy.set_dimension_bounds(0, 0);
+                        window.proposed_dimensions = None;
+                    }
                     continue;
                 }
+                window.proxy.set_dimension_bounds(geom.width as i32, geom.height as i32);
                 if window.proposed_dimensions == Some((geom.width, geom.height)) {
                     continue;
                 }
@@ -161,8 +165,6 @@ pub fn on_manage_start(data: &mut AppData, wm: &RiverWindowManagerV1) {
                     .proxy
                     .propose_dimensions(geom.width as i32, geom.height as i32);
                 window.proposed_dimensions = Some((geom.width, geom.height));
-                // Recommend the tiling cell as the app's maximum size.
-                window.proxy.set_dimension_bounds(geom.width as i32, geom.height as i32);
                 proposed += 1;
             }
         }

@@ -239,16 +239,20 @@ pub fn run(config: &Config) -> Result<(), String> {
 /// preventing zombie accumulation without a dedicated thread per spawn.
 fn reap_children(sigfd: &SignalFd) {
     while sigfd.read_signal().is_ok() {
-        loop {
-            match waitpid(None, Some(WaitPidFlag::WNOHANG)) {
-                Ok(WaitStatus::StillAlive) => break,
-                Err(nix::errno::Errno::ECHILD) => break,
-                Err(e) => {
-                    log::warn!("reap child failed: {e}");
-                    break;
-                }
-                Ok(_) => {}
+        reap_one_round();
+    }
+}
+
+fn reap_one_round() {
+    loop {
+        match waitpid(None, Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::StillAlive) => break,
+            Err(nix::errno::Errno::ECHILD) => break,
+            Err(e) => {
+                log::warn!("reap child failed: {e}");
+                break;
             }
+            Ok(_) => {}
         }
     }
 }
@@ -308,6 +312,7 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppData {
                 let mut state = data.state.borrow_mut();
                 let output = state.active_output().unwrap_or(0);
                 let tag = state.outputs.get(output).map(|o| o.active_tag).unwrap_or(0);
+                log::info!("window created output={output} tag={}", tag + 1);
                 state.windows.push(Window::new(id, tag));
                 if let Some(window) = state.windows.last() {
                     let wid = window.id;

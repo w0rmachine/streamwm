@@ -73,9 +73,13 @@ impl Dispatch<RiverWindowV1, ()> for AppData {
         };
         match event {
             WindowEvent::Closed => {
+                if let Some(w) = state.find_window(id) {
+                    log::info!("window closed id={} app_id={:?} title={:?}", w.id, w.app_id, w.title);
+                }
                 state.windows.retain(|w| w.proxy.id() != oid);
             }
             WindowEvent::AppId { app_id } => {
+                log::info!("window app_id id={id} app_id={app_id:?}");
                 // Auto-float windows whose app id is in the configured
                 // "never tile" list (password forms, calculator, Google
                 // Meet call window, ...). Seed a centered floating position on
@@ -160,13 +164,17 @@ impl Dispatch<RiverWindowV1, ()> for AppData {
                 // protocol `fullscreen` request is applied in the next manage
                 // sequence (on_manage_start), matching the WM's own toggle.
                 if let Some(w) = state.find_window_mut(id) {
+                    log::info!("fullscreen requested id={} app_id={:?} title={:?}", w.id, w.app_id, w.title);
                     w.fullscreen = true;
+                    w.proposed_dimensions = None;
                     needs_manage = true;
                 }
             }
             WindowEvent::ExitFullscreenRequested => {
                 if let Some(w) = state.find_window_mut(id) {
+                    log::info!("exit fullscreen requested id={} app_id={:?} title={:?}", w.id, w.app_id, w.title);
                     w.fullscreen = false;
+                    w.proposed_dimensions = None;
                     needs_manage = true;
                 }
             }

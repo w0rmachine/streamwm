@@ -23,7 +23,7 @@
         # Build streamwm from the local source tree.
         streamwm = pkgs.rustPlatform.buildRustPackage {
           pname = "streamwm";
-          version = "0.1.0";
+          version = "0.5.2";
           src = self;
           cargoLock = { lockFile = ./Cargo.lock; };
           nativeBuildInputs = with pkgs; [
