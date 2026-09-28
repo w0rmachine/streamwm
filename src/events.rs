@@ -222,20 +222,12 @@ impl Dispatch<RiverOutputV1, ()> for AppData {
             OutputEvent::Position { x, y } => {
                 state.outputs[idx].x = x;
                 state.outputs[idx].y = y;
-                if state.outputs[idx].usable_width == 0 && state.outputs[idx].usable_height == 0 {
-                    state.outputs[idx].usable_x = x;
-                    state.outputs[idx].usable_y = y;
-                }
                 state.repair_outputs();
                 changed = true;
             }
             OutputEvent::Dimensions { width, height } => {
                 state.outputs[idx].width = width as u32;
                 state.outputs[idx].height = height as u32;
-                if state.outputs[idx].usable_width == 0 && state.outputs[idx].usable_height == 0 {
-                    state.outputs[idx].usable_width = width as u32;
-                    state.outputs[idx].usable_height = height as u32;
-                }
                 state.repair_outputs();
                 changed = true;
             }

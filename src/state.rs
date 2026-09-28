@@ -141,6 +141,10 @@ pub struct Output {
     /// Total output height (logical pixels).
     pub height: u32,
     /// Usable X area left after layer-shell panels (e.g. Waybar).
+    ///
+    /// `RiverLayerShellOutputV1::non_exclusive_area` is the only writer of the
+    /// four `usable_*` fields; while they are all zero river has not reported
+    /// an area yet and consumers must fall back to the full output box.
     pub usable_x: i32,
     /// Usable Y area left after layer-shell panels.
     pub usable_y: i32,
