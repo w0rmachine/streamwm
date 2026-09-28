@@ -256,6 +256,14 @@ impl State {
         }
     }
 
+    /// Toggle modal resize mode, returning the new state. The key that enters
+    /// resize mode also leaves it; otherwise the only exit would be a bare
+    /// Escape, which resize mode itself swallows.
+    pub fn toggle_resize_mode(&mut self) -> bool {
+        self.resize_mode = !self.resize_mode;
+        self.resize_mode
+    }
+
     /// Master fraction for `tag`'s layout (per-tag; falls back to the default).
     pub fn master_fraction(&self, tag: usize) -> f64 {
         self.tags
@@ -665,6 +673,16 @@ mod tests {
         assert_eq!(state.master_fraction(2), 0.9);
         state.set_master_fraction(2, -1.0);
         assert_eq!(state.master_fraction(2), 0.1);
+    }
+
+    #[test]
+    fn resize_mode_toggles_both_ways() {
+        let mut state = State::new(0.55);
+        assert!(!state.resize_mode);
+        assert!(state.toggle_resize_mode());
+        assert!(state.resize_mode);
+        assert!(!state.toggle_resize_mode());
+        assert!(!state.resize_mode);
     }
 
     #[test]

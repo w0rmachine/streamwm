@@ -364,11 +364,14 @@ fn run_action(data: &mut AppData, action: &str) {
             log::debug!("cycle_layout (single layout; no-op)");
         }
         "enter_resize_mode" => {
-            data.state.borrow_mut().resize_mode = true;
-            // Re-enable the resize-mode-only keybindings (h/l/arrows/Escape)
-            // via a manage sequence.
+            // Toggle, so the key that entered resize mode also leaves it.
+            // Otherwise the only exit is a bare Escape, which is itself
+            // swallowed while the mode is active.
+            let on = data.state.borrow_mut().toggle_resize_mode();
+            // Re-enable/disable the resize-mode-only keybindings
+            // (h/l/arrows/Escape) via a manage sequence.
             needs_manage = true;
-            log::debug!("resize mode on");
+            log::debug!("resize mode {}", if on { "on" } else { "off" });
         }
         "exit_resize_mode" => {
             data.state.borrow_mut().resize_mode = false;
