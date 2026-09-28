@@ -34,10 +34,10 @@ const OPEN_DEBOUNCE: Duration = Duration::from_millis(1500);
 /// Additional wait before a retry switch, to catch the race where kanshi
 /// applies the open profile before the panel is ready.
 const OPEN_RETRY_DELAY: Duration = Duration::from_millis(2000);
-/// Periodic recovery interval while the lid is open and only the internal
-/// panel is connected. This covers output-loss races that happen after
-/// undocking without another lid transition.
-const UNDOCKED_RECOVERY_INTERVAL: Duration = Duration::from_secs(30);
+/// Retry interval for a recovery that reported failure (e.g. kanshi has not
+/// started yet). Only a failed recovery is retried, so a healthy session does
+/// not re-apply its output configuration every tick.
+const RECOVERY_RETRY_INTERVAL: Duration = Duration::from_secs(30);
 /// Fast retries after an output topology change. Dock removal and resume can
 /// race river's DRM reprobe, so a single immediate profile switch is not
 /// sufficient even though sysfs already reports the panel as connected.
@@ -133,10 +133,10 @@ fn run(
 
     let mut prev_lid_closed: Option<bool> = None;
     let mut prev_topology: Option<DisplayTopology> = None;
-    let mut last_undocked_recovery = Instant::now()
-        .checked_sub(UNDOCKED_RECOVERY_INTERVAL)
-        .unwrap_or_else(Instant::now);
     let mut undocked_retry: Option<(usize, Instant)> = None;
+    // Set only while a recovery keeps failing, so a healthy session stops
+    // re-applying its output configuration.
+    let mut recovery_retry: Option<Instant> = None;
 
     loop {
         let closed = match latest_lid_event(lid_rx.try_iter()) {
@@ -160,20 +160,20 @@ fn run(
                     recover_open_outputs(config, display_topology(&config.internal_output))?;
                     thread::sleep(OPEN_RETRY_DELAY);
                     recover_open_outputs(config, display_topology(&config.internal_output))?;
-                    last_undocked_recovery = Instant::now();
                 }
             }
         }
 
         if !closed && !initial_state {
-            let recovery_due = last_undocked_recovery.elapsed() >= UNDOCKED_RECOVERY_INTERVAL;
-            let retry_due = undocked_retry.is_some_and(|(_, due)| Instant::now() >= due);
+            let retry_due = undocked_retry.is_some_and(|(_, due)| Instant::now() >= due)
+                || recovery_retry.is_some_and(|due| Instant::now() >= due);
 
-            if should_recover_undocked(closed, topology, topology_changed, retry_due, recovery_due)
-            {
-                recover_undocked(config)?;
+            if should_recover_undocked(closed, topology, topology_changed, retry_due) {
                 let recovered_at = Instant::now();
-                last_undocked_recovery = recovered_at;
+                let recovered = recover_undocked(config)?;
+                // A failing recovery (kanshi down, profile missing) is retried
+                // until it succeeds; a successful one is not re-applied.
+                recovery_retry = (!recovered).then(|| recovered_at + RECOVERY_RETRY_INTERVAL);
 
                 undocked_retry = if topology_changed {
                     Some((0, recovered_at + UNDOCKED_RETRY_DELAYS[0]))
@@ -187,17 +187,21 @@ fn run(
                 };
             } else if topology_changed && topology.external_connected {
                 undocked_retry = None;
+                recovery_retry = None;
                 apply_profile(&config.open_profile, "external output connected")?;
             } else if !topology.internal_connected || topology.external_connected {
                 undocked_retry = None;
+                recovery_retry = None;
             }
         } else if !initial_state && topology_changed {
             // A dock can be attached or removed while the lid is already
             // closed. Re-evaluate instead of waiting for another lid event.
             apply_closed_profile(config, topology, "closed-lid topology changed")?;
             undocked_retry = None;
+            recovery_retry = None;
         } else {
             undocked_retry = None;
+            recovery_retry = None;
         }
 
         prev_lid_closed = Some(closed);
@@ -226,7 +230,7 @@ fn apply_current_profile(
     if closed {
         apply_closed_profile(config, topology, reason)
     } else if topology.internal_connected && !topology.external_connected {
-        recover_undocked(config)
+        recover_undocked(config).map(|_| ())
     } else {
         apply_profile(&config.open_profile, reason)
     }
@@ -247,7 +251,7 @@ fn apply_closed_profile(
             "lid/output recovery: {reason}; no external output is connected, preserving `{}`",
             config.internal_output
         );
-        recover_undocked(config)
+        recover_undocked(config).map(|_| ())
     }
 }
 
@@ -261,26 +265,27 @@ fn recover_open_outputs(
     topology: DisplayTopology,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if topology.internal_connected && !topology.external_connected {
-        recover_undocked(config)
+        recover_undocked(config).map(|_| ())
     } else {
         apply_profile(&config.open_profile, "lid opened")
     }
 }
 
-/// Re-enable the internal panel via `wlr-randr` and switch to the undocked kanshi profile.
-fn recover_undocked(config: &Lid) -> Result<(), Box<dyn std::error::Error>> {
+/// Re-enable the internal panel via `wlr-randr` and switch to the undocked
+/// kanshi profile. Reports whether both commands succeeded.
+fn recover_undocked(config: &Lid) -> Result<bool, Box<dyn std::error::Error>> {
     log::info!(
         "lid/output recovery: internal={} connected, no external outputs; switching kanshi to `{}`",
         config.internal_output,
         config.undocked_profile
     );
 
-    run_command(
+    let output_ok = run_command(
         "wlr-randr",
         &["--output", &config.internal_output, "--on", "--preferred"],
     );
-    switch_kanshi_profile(&config.undocked_profile);
-    Ok(())
+    let profile_ok = switch_kanshi_profile(&config.undocked_profile);
+    Ok(output_ok && profile_ok)
 }
 
 /// Switch kanshi to a named profile, logging the rationale.
@@ -296,12 +301,11 @@ fn should_recover_undocked(
     topology: DisplayTopology,
     topology_changed: bool,
     retry_due: bool,
-    recovery_due: bool,
 ) -> bool {
     !closed
         && topology.internal_connected
         && !topology.external_connected
-        && (topology_changed || retry_due || recovery_due)
+        && (topology_changed || retry_due)
 }
 
 /// Split comma-separated fallback profile list into individual profile candidate names.
@@ -437,10 +441,10 @@ mod tests {
             external_connected: true,
         };
 
-        assert!(should_recover_undocked(false, undocked, true, false, false));
-        assert!(should_recover_undocked(false, undocked, false, true, false));
-        assert!(!should_recover_undocked(true, undocked, true, true, true));
-        assert!(!should_recover_undocked(false, docked, true, true, true));
+        assert!(should_recover_undocked(false, undocked, true, false));
+        assert!(should_recover_undocked(false, undocked, false, true));
+        assert!(!should_recover_undocked(true, undocked, true, true));
+        assert!(!should_recover_undocked(false, docked, true, true));
     }
 
     #[test]
