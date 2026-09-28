@@ -1,6 +1,6 @@
 [package]
 name = "streamwm"
-version = "0.5.2"
+version = "0.5.3"
 edition = "2021"
 description = "A tiling window manager for the river Wayland compositor"
 license = "MIT"
@@ -15,7 +15,13 @@ wayland-backend = "0.3"
 wayland-scanner = "0.31"
 wayland-protocols = { version = "0.32", features = ["client"] }
 bitflags = "2"
-nix = { version = "0.31", features = ["socket", "poll", "signal", "event", "process"] }
+nix = { version = "0.31", features = [
+    "socket",
+    "poll",
+    "signal",
+    "event",
+    "process",
+] }
 log = "0.4"
 env_logger = "0.11"
 serde = { version = "1", features = ["derive"] }
