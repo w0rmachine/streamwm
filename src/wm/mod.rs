@@ -135,7 +135,6 @@ pub fn on_manage_start(data: &mut AppData, wm: &RiverWindowManagerV1) {
         let state = data.state.borrow();
         layout::compute_all(&state, &data.config)
     };
-    let tiled_ids: std::collections::HashSet<u32> = geometries.iter().map(|(id, _)| *id).collect();
 
     {
         let mut state = data.state.borrow_mut();
@@ -151,20 +150,19 @@ pub fn on_manage_start(data: &mut AppData, wm: &RiverWindowManagerV1) {
                 // so skip proposing and clear any stale bound so the app is
                 // not constrained after leaving fullscreen.
                 if window.fullscreen {
-                    if window.proposed_dimensions.is_some() {
-                        window.proxy.set_dimension_bounds(0, 0);
-                        window.proposed_dimensions = None;
-                    }
+                    window.proxy.set_dimension_bounds(0, 0);
                     continue;
                 }
+                // Propose unconditionally: a window can be re-shown after its
+                // app committed a size of its own (CSD margins, session
+                // restore), and river only re-configures a window when the
+                // manage sequence carrying that configure also proposes
+                // dimensions — otherwise the stale size sticks and the window
+                // overflows its tile.
                 window.proxy.set_dimension_bounds(geom.width as i32, geom.height as i32);
-                if window.proposed_dimensions == Some((geom.width, geom.height)) {
-                    continue;
-                }
                 window
                     .proxy
                     .propose_dimensions(geom.width as i32, geom.height as i32);
-                window.proposed_dimensions = Some((geom.width, geom.height));
                 proposed += 1;
             }
         }
@@ -180,11 +178,7 @@ pub fn on_manage_start(data: &mut AppData, wm: &RiverWindowManagerV1) {
                     window.max_width,
                     window.max_height,
                 );
-                if window.proposed_dimensions == Some((w, h)) {
-                    continue;
-                }
                 window.proxy.propose_dimensions(w as i32, h as i32);
-                window.proposed_dimensions = Some((w, h));
                 proposed += 1;
             }
         }
@@ -198,8 +192,11 @@ pub fn on_manage_start(data: &mut AppData, wm: &RiverWindowManagerV1) {
         use crate::protocols::wm::river_window_v1::Edges;
         let mut state = data.state.borrow_mut();
         for w in state.windows.iter_mut() {
-            // Fullscreen windows are not part of the tiling layout.
-            let is_tiled = !w.fullscreen && tiled_ids.contains(&w.id);
+            // A window in the tiling layout stays tiled while its tag is
+            // inactive. Reporting it untiled on every tag switch makes CSD apps
+            // re-layout (restore shadow margins, reclaim border) while hidden,
+            // which resizes the window behind the WM's back.
+            let is_tiled = !w.floating && !w.fullscreen;
             if w.tiled_applied == Some(is_tiled) {
                 continue;
             }

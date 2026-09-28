@@ -83,8 +83,6 @@ pub struct Window {
     pub caps_set: bool,
     /// Last `set_tiled` state sent (Some(true) = tiled, Some(false) = not).
     pub tiled_applied: Option<bool>,
-    /// Last content dimensions proposed to River compositor.
-    pub proposed_dimensions: Option<(u32, u32)>,
     /// Last border configuration sent to River: (focused, width, r, g, b).
     pub border_applied: Option<(bool, u32, u8, u8, u8)>,
     /// River render node proxy created via `get_node`.
@@ -118,7 +116,6 @@ impl Window {
             ssd_applied: None,
             caps_set: false,
             tiled_applied: None,
-            proposed_dimensions: None,
             border_applied: None,
             node: None,
         }

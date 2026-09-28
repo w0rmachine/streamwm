@@ -166,7 +166,6 @@ impl Dispatch<RiverWindowV1, ()> for AppData {
                 if let Some(w) = state.find_window_mut(id) {
                     log::info!("fullscreen requested id={} app_id={:?} title={:?}", w.id, w.app_id, w.title);
                     w.fullscreen = true;
-                    w.proposed_dimensions = None;
                     needs_manage = true;
                 }
             }
@@ -174,7 +173,6 @@ impl Dispatch<RiverWindowV1, ()> for AppData {
                 if let Some(w) = state.find_window_mut(id) {
                     log::info!("exit fullscreen requested id={} app_id={:?} title={:?}", w.id, w.app_id, w.title);
                     w.fullscreen = false;
-                    w.proposed_dimensions = None;
                     needs_manage = true;
                 }
             }
