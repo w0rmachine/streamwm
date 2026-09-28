@@ -4,10 +4,11 @@
 //! and scripts to retrieve window manager status snapshots (`get_status`) and send control commands
 //! (`focus_tag`, `send_to_tag`, `focus_output`, `focus_window`, `spawn`, `quit`).
 //!
-//! `subscribe` opts a connection into a long-lived push stream: the current snapshot is sent
-//! immediately, then a fresh snapshot is streamed whenever WM state changes (driven from
-//! [`refresh_snapshot`]). Delivery is converging — a slow client skips intermediate states and
-//! always receives the newest one — so publishing never blocks the WM thread.
+//! `subscribe` opts a connection into a long-lived push stream: the current snapshot is
+//! sent immediately (built on demand by the WM thread), then a fresh snapshot is streamed
+//! whenever WM state changes (driven from [`refresh_snapshot`]). Delivery is converging — a
+//! slow client skips intermediate states and always receives the newest one — so publishing
+//! never blocks the WM thread.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -27,6 +28,21 @@ use crate::state::State;
 /// replaced by the newer one. This keeps memory bounded no matter how slow or
 /// wedged a client is.
 const SUBSCRIBER_QUEUE_DEPTH: usize = 1;
+
+/// Maximum number of concurrent status socket client handlers.
+const MAX_STATUS_CLIENTS: usize = 16;
+
+/// Live client handler count, used to bound thread creation.
+static ACTIVE_CLIENTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Decrements the live client count when a handler thread exits.
+struct ClientGuard;
+
+impl Drop for ClientGuard {
+    fn drop(&mut self) {
+        ACTIVE_CLIENTS.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
 
 /// Handle to one connected `subscribe` client.
 ///
@@ -163,6 +179,10 @@ pub enum Command {
     Refresh,
 }
 
+/// Request for an on-demand snapshot: the socket thread sends the response
+/// channel and the WM thread answers from the current state.
+pub type StatusRequest = mpsc::SyncSender<StatusSnapshot>;
+
 /// Constructs a pure data `StatusSnapshot` from current WM state.
 pub fn build_snapshot(state: &State, allow_spawn: bool) -> StatusSnapshot {
     let focused_output_idx = state.active_output();
@@ -231,13 +251,13 @@ pub fn build_snapshot(state: &State, allow_spawn: bool) -> StatusSnapshot {
 
 /// Spawns the IPC socket thread listening on `$XDG_RUNTIME_DIR/streamwm-<display>.sock`.
 ///
-/// Returns the command receiver, the shared snapshot, and the subscriber
-/// registry used to push snapshots to `subscribe` clients.
+/// Returns the command receiver, the on-demand snapshot request receiver, and
+/// the subscriber registry used to push snapshots to `subscribe` clients.
 pub fn start(
     wake: Arc<EventFd>,
 ) -> (
     mpsc::Receiver<Command>,
-    Arc<Mutex<StatusSnapshot>>,
+    mpsc::Receiver<StatusRequest>,
     Arc<Mutex<Subscribers>>,
 ) {
     start_on(socket_path(), wake)
@@ -252,16 +272,16 @@ fn start_on(
     wake: Arc<EventFd>,
 ) -> (
     mpsc::Receiver<Command>,
-    Arc<Mutex<StatusSnapshot>>,
+    mpsc::Receiver<StatusRequest>,
     Arc<Mutex<Subscribers>>,
 ) {
-    let snapshot = Arc::new(Mutex::new(StatusSnapshot::default()));
     let subscribers: Arc<Mutex<Subscribers>> = Arc::new(Mutex::new(Subscribers::default()));
     let (tx, rx) = mpsc::channel::<Command>();
+    let (status_tx, status_rx) = mpsc::channel::<StatusRequest>();
 
-    let snapshot_for_thread = snapshot.clone();
     let subscribers_for_thread = subscribers.clone();
     let tx_for_thread = tx.clone();
+    let status_tx_for_thread = status_tx.clone();
 
     thread::spawn(move || {
         // Remove stale socket if present.
@@ -277,15 +297,26 @@ fn start_on(
 
         for stream in listener.incoming() {
             let Ok(stream) = stream else { continue };
-            let snap = snapshot_for_thread.clone();
+            if ACTIVE_CLIENTS.fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+                >= MAX_STATUS_CLIENTS
+            {
+                ACTIVE_CLIENTS.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+                let mut stream = stream;
+                let _ = writeln!(stream, "{{\"error\":\"too many status clients\"}}");
+                continue;
+            }
             let subs = subscribers_for_thread.clone();
             let tx = tx_for_thread.clone();
+            let status_tx = status_tx_for_thread.clone();
             let wake = wake.clone();
-            thread::spawn(move || handle_client(stream, snap, subs, tx, wake));
+            thread::spawn(move || {
+                let _guard = ClientGuard;
+                handle_client(stream, subs, tx, status_tx, wake);
+            });
         }
     });
 
-    (rx, snapshot, subscribers)
+    (rx, status_rx, subscribers)
 }
 
 fn socket_path() -> std::path::PathBuf {
@@ -294,12 +325,27 @@ fn socket_path() -> std::path::PathBuf {
     std::path::PathBuf::from(runtime).join(format!("streamwm-{display}.sock"))
 }
 
+/// Ask the WM thread for a fresh snapshot, waiting up to 2 seconds for it to
+/// answer. Returns `None` if the WM thread is gone or too busy to respond.
+fn request_snapshot(
+    status_tx: &mpsc::Sender<StatusRequest>,
+    wake: &EventFd,
+) -> Option<StatusSnapshot> {
+    let (resp_tx, resp_rx) = mpsc::sync_channel::<StatusSnapshot>(1);
+    if status_tx.send(resp_tx).is_err() {
+        return None;
+    }
+    // Poke the main loop so it drains the request channel promptly.
+    let _ = wake.write(1);
+    resp_rx.recv_timeout(std::time::Duration::from_secs(2)).ok()
+}
+
 /// Client socket request handler (runs on a dedicated client thread).
 fn handle_client(
     stream: UnixStream,
-    snapshot: Arc<Mutex<StatusSnapshot>>,
     subscribers: Arc<Mutex<Subscribers>>,
     tx: mpsc::Sender<Command>,
+    status_tx: mpsc::Sender<StatusRequest>,
     wake: Arc<EventFd>,
 ) {
     // Hardening: set a read timeout (2s) so idle or malicious socket connections do not block indefinitely.
@@ -325,9 +371,15 @@ fn handle_client(
 
         // `get_status` is the only non-JSON command (bare word).
         if line == "get_status" {
-            let snap = snapshot.lock().unwrap().clone();
-            let json = serde_json::to_string(&snap).unwrap_or_else(|_| "{}".into());
-            let _ = writeln!(writer, "{json}");
+            match request_snapshot(&status_tx, &wake) {
+                Some(snap) => {
+                    let json = serde_json::to_string(&snap).unwrap_or_else(|_| "{}".into());
+                    let _ = writeln!(writer, "{json}");
+                }
+                None => {
+                    let _ = writeln!(writer, "{{\"error\":\"status timeout\"}}");
+                }
+            }
             break;
         }
 
@@ -341,7 +393,7 @@ fn handle_client(
         // `subscribe` opts in to a long-lived push stream instead of the usual
         // one-shot request/response exchange.
         if name == "subscribe" {
-            stream_snapshots(writer, snapshot, subscribers);
+            stream_snapshots(writer, subscribers, status_tx, wake);
             return;
         }
 
@@ -369,13 +421,16 @@ fn handle_client(
 /// intermediate states instead of falling behind.
 fn stream_snapshots(
     mut writer: UnixStream,
-    snapshot: Arc<Mutex<StatusSnapshot>>,
     subscribers: Arc<Mutex<Subscribers>>,
+    status_tx: mpsc::Sender<StatusRequest>,
+    wake: Arc<EventFd>,
 ) {
     // Enlarge the write timeout so a briefly busy client is not dropped while
     // a permanently stalled one is still eventually disconnected.
     let _ = writer.set_write_timeout(Some(std::time::Duration::from_secs(5)));
 
+    // Register before fetching the initial snapshot so a concurrent publish
+    // between the two is not missed.
     let (id, latest, wake_rx) = {
         let mut subs = subscribers.lock().unwrap();
         subs.register()
@@ -384,7 +439,19 @@ fn stream_snapshots(
 
     // Send the current snapshot first so the client renders immediately rather
     // than waiting for the next state change.
-    let initial = snapshot.lock().unwrap().clone();
+    let Some(initial) = request_snapshot(&status_tx, &wake) else {
+        subscribers.lock().unwrap().unregister(id);
+        log::info!("status subscriber {id} disconnected before first snapshot");
+        return;
+    };
+    // The request is answered by the WM thread, which may have published a
+    // snapshot before it built this one. Discard such a pre-`initial` value and
+    // its wake token: it is older than `initial`, so writing it afterwards
+    // would regress the client to stale data until the next publish.
+    if let Ok(mut slot) = latest.lock() {
+        *slot = None;
+    }
+    while wake_rx.try_recv().is_ok() {}
     if let Ok(json) = serde_json::to_string(&initial) {
         if writeln!(writer, "{json}")
             .and_then(|_| writer.flush())
@@ -516,40 +583,47 @@ pub fn apply_command(data: &mut crate::connection::AppData, cmd: Command) {
     }
 }
 
-/// Refresh the status snapshot from the current state and push it to any
-/// `subscribe` clients.
+/// Push the current state to any `subscribe` clients.
 ///
-/// Serialization happens once per refresh and is shared across subscribers.
-/// Publishing never blocks: a subscriber that has not drained its single-slot
-/// channel is skipped and will receive the next snapshot instead.
+/// Does nothing at all — no snapshot build, no serialization — when no client
+/// is subscribed. Serialization happens once per refresh and is shared across
+/// subscribers. Publishing never blocks: a subscriber that has not drained its
+/// single-slot channel is skipped and will receive the next snapshot instead.
 pub fn refresh_snapshot(data: &crate::connection::AppData) {
-    if let Some(snapshot) = &data.snapshot {
+    let Some(subscribers) = &data.subscribers else {
+        return;
+    };
+    // Skip cost entirely when nobody is listening.
+    let has_clients = subscribers
+        .lock()
+        .map(|subs| !subs.clients.is_empty())
+        .unwrap_or(false);
+    if !has_clients {
+        return;
+    }
+    let json = {
         let state = data.state.borrow();
         let snap = build_snapshot(&state, data.config.allow_spawn);
-        drop(state);
-        if let Ok(mut guard) = snapshot.lock() {
-            *guard = snap;
+        serde_json::to_string(&snap).ok()
+    };
+    if let Some(json) = json {
+        if let Ok(mut subs) = subscribers.lock() {
+            subs.publish(&json);
         }
     }
+}
 
-    if let Some(subscribers) = &data.subscribers {
-        // Skip cost entirely when nobody is listening.
-        let has_clients = subscribers
-            .lock()
-            .map(|subs| !subs.clients.is_empty())
-            .unwrap_or(false);
-        if has_clients {
-            let json = data
-                .snapshot
-                .as_ref()
-                .and_then(|s| s.lock().ok())
-                .and_then(|guard| serde_json::to_string(&*guard).ok());
-            if let Some(json) = json {
-                if let Ok(mut subs) = subscribers.lock() {
-                    subs.publish(&json);
-                }
-            }
-        }
+/// Answer pending on-demand snapshot requests from socket client threads.
+pub fn service_status_requests(
+    requests: &mpsc::Receiver<StatusRequest>,
+    data: &crate::connection::AppData,
+) {
+    while let Ok(resp) = requests.try_recv() {
+        let snap = {
+            let state = data.state.borrow();
+            build_snapshot(&state, data.config.allow_spawn)
+        };
+        let _ = resp.send(snap);
     }
 }
 
@@ -681,7 +755,17 @@ mod tests {
 
         let wake =
             Arc::new(EventFd::from_flags(nix::sys::eventfd::EfdFlags::EFD_NONBLOCK).unwrap());
-        let (_rx, snapshot, subscribers) = start_on(path.clone(), wake);
+        let (_command_rx, status_rx, subscribers) = start_on(path.clone(), wake);
+
+        // Stand in for the WM thread: answer every on-demand snapshot request.
+        thread::spawn(move || {
+            while let Ok(resp) = status_rx.recv() {
+                let _ = resp.send(StatusSnapshot {
+                    focused_output: Some("DP-1".into()),
+                    outputs: vec![],
+                });
+            }
+        });
 
         // Wait for the listener to bind.
         for _ in 0..100 {
@@ -690,12 +774,6 @@ mod tests {
             }
             thread::sleep(std::time::Duration::from_millis(10));
         }
-
-        // Seed a known snapshot before connecting.
-        *snapshot.lock().unwrap() = StatusSnapshot {
-            focused_output: Some("DP-1".into()),
-            outputs: vec![],
-        };
 
         let client = UnixStream::connect(&path).unwrap();
         client
@@ -740,6 +818,75 @@ mod tests {
             thread::sleep(std::time::Duration::from_millis(10));
         }
         assert!(pruned, "subscriber was not pruned after disconnect");
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn subscribe_discards_snapshot_published_before_initial() {
+        // A publish that lands between registering and the on-demand initial
+        // snapshot being answered is older than the initial, so it must not be
+        // written after it (which would regress the client to stale data).
+        let dir =
+            std::env::temp_dir().join(format!("streamwm-subscribe-stale-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("stale.sock");
+        let _ = std::fs::remove_file(&path);
+
+        let wake =
+            Arc::new(EventFd::from_flags(nix::sys::eventfd::EfdFlags::EFD_NONBLOCK).unwrap());
+        let (_command_rx, status_rx, subscribers) = start_on(path.clone(), wake);
+
+        // Stand in for the WM thread: publish an older snapshot before
+        // answering the request, as a refresh earlier in the same loop
+        // iteration would.
+        let subs_for_wm = subscribers.clone();
+        thread::spawn(move || {
+            while let Ok(resp) = status_rx.recv() {
+                if let Ok(mut subs) = subs_for_wm.lock() {
+                    subs.publish(r#"{"focused_output":"STALE"}"#);
+                }
+                let _ = resp.send(StatusSnapshot {
+                    focused_output: Some("FRESH".into()),
+                    outputs: vec![],
+                });
+            }
+        });
+
+        for _ in 0..100 {
+            if path.exists() {
+                break;
+            }
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let client = UnixStream::connect(&path).unwrap();
+        client
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        {
+            let mut w = client.try_clone().unwrap();
+            w.write_all(b"{\"cmd\":\"subscribe\"}\n").unwrap();
+        }
+
+        let mut reader = BufReader::new(client.try_clone().unwrap());
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        assert!(line.contains("FRESH"), "initial snapshot missing: {line:?}");
+
+        // The next snapshot the client sees must be the next publish, never the
+        // stale one that was already pending when the initial was written.
+        {
+            let mut subs = subscribers.lock().unwrap();
+            subs.publish(r#"{"focused_output":"MARKER"}"#);
+        }
+        line.clear();
+        reader.read_line(&mut line).unwrap();
+        assert!(
+            line.contains("MARKER"),
+            "stale snapshot delivered after initial: {line:?}"
+        );
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir(&dir);

@@ -139,11 +139,11 @@ pub fn on_manage_start(data: &mut AppData, wm: &RiverWindowManagerV1) {
     {
         let mut state = data.state.borrow_mut();
         let mut proposed = 0usize;
-        for (wid, geom) in geometries {
+        for (wid, geom) in &geometries {
             if geom.width == 0 || geom.height == 0 {
                 continue;
             }
-            if let Some(window) = state.find_window_mut(wid) {
+            if let Some(window) = state.find_window_mut(*wid) {
                 // Tiled windows fill their cell exactly — never clamp to the
                 // app's min/max hints (those apply to floating resize only).
                 // Fullscreen windows are sized by river, not the tiling cell,
@@ -215,7 +215,7 @@ pub fn on_manage_start(data: &mut AppData, wm: &RiverWindowManagerV1) {
     // are only enabled while resize mode is active; otherwise they would
     // swallow those plain keys everywhere.
     let resize_mode = data.state.borrow().resize_mode;
-    for (binding, action) in &data.bindings {
+    for (binding, action, _) in &data.bindings {
         if crate::bindings::is_resize_binding(action) {
             if resize_mode {
                 binding.enable();
@@ -226,7 +226,7 @@ pub fn on_manage_start(data: &mut AppData, wm: &RiverWindowManagerV1) {
             binding.enable();
         }
     }
-    for (binding, _action) in &data.pointer_bindings {
+    for (binding, _, _) in &data.pointer_bindings {
         binding.enable();
     }
 

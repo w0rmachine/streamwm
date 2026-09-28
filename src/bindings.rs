@@ -141,7 +141,7 @@ pub fn bind_for_seat(data: &mut AppData, xkb: &RiverXkbBindingsV1, seat: &RiverS
         };
         let m = parse_modifiers(&mods, &modifier);
         let binding = xkb.get_xkb_binding(seat, ks, m, &qh, ());
-        data.bindings.push((binding, action));
+        data.bindings.push((binding, action, seat.id()));
     }
 }
 
@@ -157,8 +157,10 @@ pub fn bind_pointer_for_seat(data: &mut AppData, seat: &RiverSeatV1) {
 
     let b_move = seat.get_pointer_binding(BTN_LEFT, m, &qh, ());
     let b_resize = seat.get_pointer_binding(BTN_RIGHT, m, &qh, ());
-    data.pointer_bindings.push((b_move, "move".into()));
-    data.pointer_bindings.push((b_resize, "resize".into()));
+    data.pointer_bindings
+        .push((b_move, "move".into(), seat.id()));
+    data.pointer_bindings
+        .push((b_resize, "resize".into(), seat.id()));
 }
 
 /// Dispatch a triggered binding to its action.
@@ -167,8 +169,8 @@ pub fn dispatch_action(data: &mut AppData, triggered: &RiverXkbBindingV1) {
     let action = data
         .bindings
         .iter()
-        .find(|(b, _)| b.id() == triggered.id())
-        .map(|(_, a)| a.clone());
+        .find(|(b, _, _)| b.id() == triggered.id())
+        .map(|(_, a, _)| a.clone());
 
     let Some(action) = action else {
         log::warn!("triggered unknown binding");
@@ -457,8 +459,8 @@ fn start_pointer_op(
     let action = data
         .pointer_bindings
         .iter()
-        .find(|(b, _)| b.id() == binding.id())
-        .map(|(_, a)| a.clone());
+        .find(|(b, _, _)| b.id() == binding.id())
+        .map(|(_, a, _)| a.clone());
     let Some(action) = action else {
         return;
     };

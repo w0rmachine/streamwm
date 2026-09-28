@@ -356,7 +356,14 @@ impl State {
         if idx >= self.outputs.len() {
             return;
         }
-        self.outputs.remove(idx);
+        let removed = self.outputs.remove(idx);
+        if let Some(layer) = &removed.layer {
+            layer.destroy();
+        }
+        if let Some(wl_output) = &removed.wl_output {
+            wl_output.release();
+        }
+        removed.proxy.destroy();
         let remaining = self.outputs.len();
         let mut owners: Vec<Option<usize>> = self.tags.iter().map(|t| t.output).collect();
         remap_tag_owners(&mut owners, idx, remaining);

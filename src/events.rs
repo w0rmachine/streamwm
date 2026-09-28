@@ -75,6 +75,10 @@ impl Dispatch<RiverWindowV1, ()> for AppData {
             WindowEvent::Closed => {
                 if let Some(w) = state.find_window(id) {
                     log::info!("window closed id={} app_id={:?} title={:?}", w.id, w.app_id, w.title);
+                    if let Some(node) = &w.node {
+                        node.destroy();
+                    }
+                    w.proxy.destroy();
                 }
                 state.windows.retain(|w| w.proxy.id() != oid);
             }
@@ -301,6 +305,42 @@ impl Dispatch<RiverSeatV1, ()> for AppData {
     ) {
         let sid = seat.id();
 
+        if matches!(event, SeatEvent::Removed) {
+            data.bindings.retain(|(binding, _, owner)| {
+                if *owner == sid {
+                    binding.destroy();
+                    false
+                } else {
+                    true
+                }
+            });
+            data.pointer_bindings.retain(|(binding, _, owner)| {
+                if *owner == sid {
+                    binding.destroy();
+                    false
+                } else {
+                    true
+                }
+            });
+            // Drop interactive ops driven by this seat: their seat proxy is
+            // destroyed below, so a later manage sequence must not drive it.
+            if data
+                .pointer_op
+                .as_ref()
+                .is_some_and(|op| op.seat.id() == sid)
+            {
+                data.pointer_op = None;
+                data.op_end_requested = false;
+            }
+            if data
+                .pending_op
+                .as_ref()
+                .is_some_and(|op| op.seat.id() == sid)
+            {
+                data.pending_op = None;
+            }
+        }
+
         // Interactive pointer operation events (floating move/resize) need to
         // mutate the op state and window geometry, so handle them before taking
         // the general `state` borrow.
@@ -393,6 +433,12 @@ impl Dispatch<RiverSeatV1, ()> for AppData {
                 }
             }
             SeatEvent::Removed => {
+                if let Some(seat) = state.seats.iter().find(|s| s.proxy.id() == sid) {
+                    if let Some(layer) = &seat.layer {
+                        layer.destroy();
+                    }
+                    seat.proxy.destroy();
+                }
                 state.seats.retain(|s| s.proxy.id() != sid);
             }
             _ => {}

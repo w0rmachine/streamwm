@@ -157,10 +157,14 @@ fn compute_tiling(
 /// Position windows and set borders during a render sequence.
 pub fn render_all_run(data: &mut AppData) {
     let config = data.config.clone();
+    // Always compute from the current state: tiling inputs (e.g. `floating`,
+    // tag membership) can change between the manage and render sequences
+    // without requesting a new manage.
     let geometries = {
         let state = data.state.borrow();
         compute_all(&state, &config)
     };
+    let geom_by_id: std::collections::HashMap<u32, Geometry> = geometries.iter().copied().collect();
 
     let focused = {
         let state = data.state.borrow();
@@ -179,10 +183,7 @@ pub fn render_all_run(data: &mut AppData) {
             .windows
             .iter()
             .map(|w| {
-                let geom = geometries
-                    .iter()
-                    .find(|(wid, _)| *wid == w.id)
-                    .map(|(_, g)| *g);
+                let geom = geom_by_id.get(&w.id).copied();
                 let floating_visible = w.floating && state.window_is_visible(w);
                 let visible = !w.minimized && (geom.is_some() || floating_visible);
                 (w.id, visible, geom)

@@ -49,19 +49,22 @@ pub struct AppData {
     pub bindings: Vec<(
         crate::protocols::xkb_bindings::river_xkb_binding_v1::RiverXkbBindingV1,
         String,
+        wayland_client::backend::ObjectId,
     )>,
     /// Track whether `river_layer_shell_v1.set_default` has been invoked.
     pub layer_default_set: bool,
     /// List of window IDs queued for protocol close requests in the next manage sequence.
     pub pending_close: Vec<u32>,
-    /// Shared thread-safe state snapshot accessed by the JSON socket server.
-    pub snapshot: Option<std::sync::Arc<std::sync::Mutex<crate::status::StatusSnapshot>>>,
     /// Registry of long-lived `subscribe` clients receiving pushed snapshots.
     pub subscribers: Option<std::sync::Arc<std::sync::Mutex<crate::status::Subscribers>>>,
+    /// On-demand snapshot requests from status socket clients, answered by the
+    /// main loop from the current state.
+    pub status_requests: Option<std::sync::mpsc::Receiver<crate::status::StatusRequest>>,
     /// Active registered pointer binding proxies mapped to `"move"` or `"resize"`.
     pub pointer_bindings: Vec<(
         crate::protocols::wm::river_pointer_binding_v1::RiverPointerBindingV1,
         String,
+        wayland_client::backend::ObjectId,
     )>,
     /// Currently active interactive pointer operation (moving or resizing a floating window).
     pub pointer_op: Option<PointerOp>,
@@ -121,8 +124,8 @@ impl AppData {
             bindings: Vec::new(),
             layer_default_set: false,
             pending_close: Vec::new(),
-            snapshot: None,
             subscribers: None,
+            status_requests: None,
             pointer_bindings: Vec::new(),
             pointer_op: None,
             pending_op: None,
@@ -156,8 +159,8 @@ pub fn run(config: &Config) -> Result<(), String> {
         EventFd::from_flags(EfdFlags::EFD_CLOEXEC | EfdFlags::EFD_NONBLOCK)
             .map_err(|e| format!("status wake eventfd: {e}"))?,
     );
-    let (command_rx, snapshot, subscribers) = crate::status::start(wake.clone());
-    data.snapshot = Some(snapshot);
+    let (command_rx, status_rx, subscribers) = crate::status::start(wake.clone());
+    data.status_requests = Some(status_rx);
     data.subscribers = Some(subscribers);
 
     info!("streamwm connected; entering event loop");
@@ -169,6 +172,7 @@ pub fn run(config: &Config) -> Result<(), String> {
             .map_err(|e| format!("dispatch: {e}"))?;
 
         service_control_commands(&command_rx, &mut data);
+        service_status_requests(&data);
 
         if data.quit {
             break;
@@ -205,6 +209,7 @@ pub fn run(config: &Config) -> Result<(), String> {
         if wake_ready {
             while wake.read().is_ok() {}
             service_control_commands(&command_rx, &mut data);
+            service_status_requests(&data);
         }
     }
 
@@ -218,6 +223,13 @@ fn service_control_commands(
 ) {
     while let Ok(cmd) = command_rx.try_recv() {
         crate::status::apply_command(data, cmd);
+    }
+}
+
+/// Answer pending on-demand status snapshot requests from socket client threads.
+fn service_status_requests(data: &AppData) {
+    if let Some(rx) = &data.status_requests {
+        crate::status::service_status_requests(rx, data);
     }
 }
 
