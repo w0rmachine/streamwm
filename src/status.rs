@@ -119,6 +119,8 @@ impl Subscribers {
 pub struct StatusSnapshot {
     /// Name of the currently focused output (e.g. `"eDP-1"`).
     pub focused_output: Option<String>,
+    /// True while modal resize mode is active (plain h/l/arrows adjust the split).
+    pub resize_mode: bool,
     /// Snapshot data for each active display output.
     pub outputs: Vec<OutputSnap>,
 }
@@ -245,6 +247,7 @@ pub fn build_snapshot(state: &State, allow_spawn: bool) -> StatusSnapshot {
     }
 
     snapshot.outputs = output_snaps;
+    snapshot.resize_mode = state.resize_mode;
     let _ = allow_spawn;
     snapshot
 }
@@ -734,6 +737,14 @@ mod tests {
     }
 
     #[test]
+    fn build_snapshot_reports_resize_mode() {
+        let mut state = State::new(0.55);
+        assert!(!build_snapshot(&state, false).resize_mode);
+        state.toggle_resize_mode();
+        assert!(build_snapshot(&state, false).resize_mode);
+    }
+
+    #[test]
     fn socket_read_timeout_prevents_indefinite_blocking() {
         let (s1, _s2) = UnixStream::pair().unwrap();
         s1.set_read_timeout(Some(std::time::Duration::from_millis(50)))
@@ -762,6 +773,7 @@ mod tests {
             while let Ok(resp) = status_rx.recv() {
                 let _ = resp.send(StatusSnapshot {
                     focused_output: Some("DP-1".into()),
+                    resize_mode: false,
                     outputs: vec![],
                 });
             }
@@ -849,6 +861,7 @@ mod tests {
                 }
                 let _ = resp.send(StatusSnapshot {
                     focused_output: Some("FRESH".into()),
+                    resize_mode: false,
                     outputs: vec![],
                 });
             }
