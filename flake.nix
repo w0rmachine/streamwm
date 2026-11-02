@@ -4,9 +4,14 @@
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
-    # Match the dotfiles' pinned nixpkgs (nixos-26.05) for ABI compatibility
-    # when consumed as a home-manager input.
-    rust-overlay.url = "github:oxalica/rust-overlay";
+    # The overlay is applied to *our* nixpkgs below, so rust-overlay's own
+    # nixpkgs input is never used -- but without `follows` it still pins a
+    # second, ancient nixpkgs into every consumer's lock file. Make it follow
+    # so the whole graph shares one nixpkgs.
+    rust-overlay = {
+      url = "github:oxalica/rust-overlay";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs = { self, nixpkgs, flake-utils, rust-overlay, ... }:
