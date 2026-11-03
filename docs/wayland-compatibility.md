@@ -79,10 +79,31 @@ binding, only fallback names like `output-0` exist.
 
 `Config.use_ssd` maps to river `use_ssd`/`use_csd` during manage sequences.
 river ignores `use_ssd` for clients that only support CSD, which is compliant
-with the protocol.
+with the protocol. `set_capabilities` advertises fullscreen, maximize, minimize
+and window menu (the `xdg_toplevel`/`xdg-decoration` capabilities toolkits such
+as GTK, Libadwaita and Qt check before drawing their header bar buttons);
+`maximize_requested` itself is still ignored.
+
+## Cursor policy
+
+river v4 shows the cursor the WM sets on the seat's `wl_pointer` whenever no
+client has pointer focus, which is the whole time an interactive operation runs.
+streamwm binds the `wl_seat` named by `river_seat_v1.wl_seat`, takes a
+`wl_pointer`, and uses `wp_cursor_shape_v1` to show `move` for `Mod`+drag and the
+resize shape matching the dragged edges (from the pointer binding or the
+window's own `pointer_resize_requested`); the shape is reset to `default` when
+the op ends. Without cursor-shape support it sets a null cursor surface instead.
+
+## Ids, portals and foreign toplevels
+
+`river_window_v1.identifier` (v4) is the compositor-assigned id that matches
+`ext_foreign_toplevel_handle_v1.identifier`, the key toolkits use to tie an XDG
+portals `AppInfo`/`ParentWindow` (a dialog parented through a portal instead of
+`xdg_toplevel.set_parent`) back to a toplevel. streamwm does not forward
+identifiers to clients yet; portal-parented dialogs are not linked to their
+parent window (no overlay placement).
 
 ## Known Gaps
 
-- `dimensions_hint`, client-driven maximize/minimize requests, and presentation hints are not yet acted on.
-- Floating windows support interactive move (`Mod+Left-Click-Drag`) and resize (`Mod+Right-Click-Drag`) via `river-pointer-binding-v1` and seat operations.
+- `dimensions_hint` is used for floating resize and overlay sizing only; presentation hints and client-driven maximize are ignored.
 - Status socket is private only by filesystem path under `XDG_RUNTIME_DIR`; keep `allow_spawn = false` if untrusted local processes can reach it.
