@@ -1,0 +1,23 @@
+#!/bin/sh
+# Format and test before every commit. Enable once per clone:
+#   git config core.hooksPath .githooks
+set -e
+
+# The toolchain lives in the dev shell, not always on PATH.
+if ! command -v cargo >/dev/null 2>&1 && command -v nix >/dev/null 2>&1; then
+    exec nix develop --command "$0" "$@"
+fi
+
+cargo fmt --all
+if ! git diff --name-only -- '*.rs' | grep -q .; then
+    tests_ok=1
+else
+    # rustfmt dropped staged, unstaged and untracked changes into the worktree:
+    # the tests would check code that is not what this commit records.
+    echo "pre-commit: cargo fmt rewrote files, run 'git add' again and retry." >&2
+    git diff --name-only -- '*.rs' >&2
+    tests_ok=0
+fi
+
+cargo test --quiet || tests_ok=0
+exit $((1 - tests_ok))

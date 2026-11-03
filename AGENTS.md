@@ -21,3 +21,9 @@ has no tag, and `normalize_outputs` gives it the lowest free tag index, so new
 windows land on a tag the user never opened. This regressed once (d640386);
 the tests `an_emptied_tag_keeps_its_output` and
 `empty_tag_loses_its_output_but_comes_back_there` in `src/state.rs` guard it.
+
+## Pre-commit hook
+
+`.githooks/pre-commit` runs `cargo fmt` and `cargo test` and blocks the
+commit on either failing. Enable it once per clone with
+`git config core.hooksPath .githooks`.
