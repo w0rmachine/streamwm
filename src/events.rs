@@ -78,7 +78,12 @@ impl Dispatch<RiverWindowV1, ()> for AppData {
         match event {
             WindowEvent::Closed => {
                 if let Some(w) = state.find_window(id) {
-                    log::info!("window closed id={} app_id={:?} title={:?}", w.id, w.app_id, w.title);
+                    log::info!(
+                        "window closed id={} app_id={:?} title={:?}",
+                        w.id,
+                        w.app_id,
+                        w.title
+                    );
                     if let Some(node) = &w.node {
                         node.destroy();
                     }
@@ -119,8 +124,15 @@ impl Dispatch<RiverWindowV1, ()> for AppData {
                             );
                             w.float_w = fw;
                             w.float_h = fh;
-                            let (x, y) =
-                                crate::state::place_over_parent(fw, fh, ax, ay, aw, ah, (ax, ay, aw, ah));
+                            let (x, y) = crate::state::place_over_parent(
+                                fw,
+                                fh,
+                                ax,
+                                ay,
+                                aw,
+                                ah,
+                                (ax, ay, aw, ah),
+                            );
                             w.float_x = x;
                             w.float_y = y;
                         }
@@ -161,18 +173,16 @@ impl Dispatch<RiverWindowV1, ()> for AppData {
                 // dialogs stay grouped with their owner instead of tiling flat.
                 let parent_geom = parent.as_ref().and_then(|p| {
                     let pid = p.id();
-                    state
-                        .windows
-                        .iter()
-                        .find(|w| w.proxy.id() == pid)
-                        .map(|w| {
-                            let area = state
-                                .window_output(w)
-                                .and_then(|o| state.outputs.get(o))
-                                .map(crate::state::output_area)
-                                .unwrap_or((w.float_x, w.float_y, w.float_w, w.float_h));
-                            (w.id, w.floating, w.float_x, w.float_y, w.float_w, w.float_h, area)
-                        })
+                    state.windows.iter().find(|w| w.proxy.id() == pid).map(|w| {
+                        let area = state
+                            .window_output(w)
+                            .and_then(|o| state.outputs.get(o))
+                            .map(crate::state::output_area)
+                            .unwrap_or((w.float_x, w.float_y, w.float_w, w.float_h));
+                        (
+                            w.id, w.floating, w.float_x, w.float_y, w.float_w, w.float_h, area,
+                        )
+                    })
                 });
                 if let Some((pid, floating, px, py, pw, ph, area)) = parent_geom {
                     let child = state
@@ -209,14 +219,24 @@ impl Dispatch<RiverWindowV1, ()> for AppData {
                 // protocol `fullscreen` request is applied in the next manage
                 // sequence (on_manage_start), matching the WM's own toggle.
                 if let Some(w) = state.find_window_mut(id) {
-                    log::info!("fullscreen requested id={} app_id={:?} title={:?}", w.id, w.app_id, w.title);
+                    log::info!(
+                        "fullscreen requested id={} app_id={:?} title={:?}",
+                        w.id,
+                        w.app_id,
+                        w.title
+                    );
                     w.fullscreen = true;
                     needs_manage = true;
                 }
             }
             WindowEvent::ExitFullscreenRequested => {
                 if let Some(w) = state.find_window_mut(id) {
-                    log::info!("exit fullscreen requested id={} app_id={:?} title={:?}", w.id, w.app_id, w.title);
+                    log::info!(
+                        "exit fullscreen requested id={} app_id={:?} title={:?}",
+                        w.id,
+                        w.app_id,
+                        w.title
+                    );
                     w.fullscreen = false;
                     needs_manage = true;
                 }
@@ -562,7 +582,12 @@ pub fn set_seat_cursor(
     seat: &RiverSeatV1,
     shape: wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape,
 ) {
-    if let Some(seat) = state.borrow().seats.iter().find(|s| s.proxy.id() == seat.id()) {
+    if let Some(seat) = state
+        .borrow()
+        .seats
+        .iter()
+        .find(|s| s.proxy.id() == seat.id())
+    {
         seat.set_cursor(shape);
     }
 }

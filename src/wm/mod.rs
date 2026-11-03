@@ -80,8 +80,10 @@ pub fn on_manage_start(data: &mut AppData, wm: &RiverWindowManagerV1) {
                 // header-bar buttons. Maximize requests are still ignored (a
                 // tiling WM has no distinct maximized state).
                 use crate::protocols::wm::river_window_v1::Capabilities;
-                let caps =
-                    Capabilities::Fullscreen | Capabilities::Maximize | Capabilities::Minimize | Capabilities::WindowMenu;
+                let caps = Capabilities::Fullscreen
+                    | Capabilities::Maximize
+                    | Capabilities::Minimize
+                    | Capabilities::WindowMenu;
                 w.proxy.set_capabilities(caps);
                 w.caps_set = true;
             }
@@ -171,7 +173,9 @@ pub fn on_manage_start(data: &mut AppData, wm: &RiverWindowManagerV1) {
                 // manage sequence carrying that configure also proposes
                 // dimensions — otherwise the stale size sticks and the window
                 // overflows its tile.
-                window.proxy.set_dimension_bounds(geom.width as i32, geom.height as i32);
+                window
+                    .proxy
+                    .set_dimension_bounds(geom.width as i32, geom.height as i32);
                 window
                     .proxy
                     .propose_dimensions(geom.width as i32, geom.height as i32);

@@ -109,7 +109,12 @@ fn logind_listener(tx: mpsc::Sender<LidEvent>) -> Result<(), Box<dyn std::error:
 fn inhibit_lid_switch(proxy: &Proxy<'_>) -> Option<zbus::zvariant::OwnedFd> {
     match proxy.call_method(
         "Inhibit",
-        &("handle-lid-switch", "streamwm", "lid profile switching", "block"),
+        &(
+            "handle-lid-switch",
+            "streamwm",
+            "lid profile switching",
+            "block",
+        ),
     ) {
         Ok(reply) => reply.body().deserialize().ok(),
         Err(e) => {

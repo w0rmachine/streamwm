@@ -471,12 +471,17 @@ impl State {
         }
 
         // Compute tag occupancy bitmask in a single pass without heap allocation.
-        let occupied_mask: u32 = self.windows.iter().fold(0u32, |acc, w| acc | (1u32 << w.tag));
+        let occupied_mask: u32 = self
+            .windows
+            .iter()
+            .fold(0u32, |acc, w| acc | (1u32 << w.tag));
 
         // Prefer an owned tag that contains windows.
-        if let Some((tag, _)) = self.tags.iter().enumerate().find(|(tag, t)| {
-            t.output == Some(output_idx) && ((occupied_mask & (1u32 << tag)) != 0)
-        }) {
+        if let Some((tag, _)) =
+            self.tags.iter().enumerate().find(|(tag, t)| {
+                t.output == Some(output_idx) && ((occupied_mask & (1u32 << tag)) != 0)
+            })
+        {
             return Some(tag);
         }
 
@@ -609,10 +614,8 @@ impl State {
             return;
         }
         let focused = self.outputs[output_idx].focused_window;
-        let Some(fid) = focused.filter(|fid| {
-            self.find_window(*fid)
-                .is_some_and(|w| w.tag != tag)
-        }) else {
+        let Some(fid) = focused.filter(|fid| self.find_window(*fid).is_some_and(|w| w.tag != tag))
+        else {
             return;
         };
         if self.tags[tag].output.is_none() {
@@ -720,7 +723,12 @@ pub fn place_over_parent(
 /// or the whole output before river reports one.
 pub fn output_area(output: &Output) -> (i32, i32, u32, u32) {
     if output.usable_width > 0 || output.usable_height > 0 {
-        (output.usable_x, output.usable_y, output.usable_width, output.usable_height)
+        (
+            output.usable_x,
+            output.usable_y,
+            output.usable_width,
+            output.usable_height,
+        )
     } else {
         (output.x, output.y, output.width, output.height)
     }
@@ -836,7 +844,11 @@ mod tests {
                 .unwrap(),
             );
         }
-        P::from_id(&CONN.with(|c| c.clone()), wayland_client::backend::ObjectId::null()).unwrap()
+        P::from_id(
+            &CONN.with(|c| c.clone()),
+            wayland_client::backend::ObjectId::null(),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -882,7 +894,11 @@ mod tests {
 
         // Untagged windows are not drawn, so the tag left behind is gone.
         state.send_focused_to_tag(0, 2);
-        assert_eq!(state.tag_owner(1), Some(0), "ownership is kept for the window");
+        assert_eq!(
+            state.tag_owner(1),
+            Some(0),
+            "ownership is kept for the window"
+        );
         assert!(!state.window_is_visible(state.find_window(wid).unwrap()));
         assert_eq!(state.find_window(wid).unwrap().tag, 2);
         assert_eq!(state.tag_owner(2), Some(0));
@@ -913,7 +929,10 @@ mod tests {
         assert_eq!(state.tag_owner(1), Some(0), "1 still has the output");
         state.focus_tag(0, 1);
         state.focus_tag(0, 0);
-        assert_eq!(state.outputs[0].active_tag, 0, "back on 0, not on a free tag");
+        assert_eq!(
+            state.outputs[0].active_tag, 0,
+            "back on 0, not on a free tag"
+        );
         assert_eq!(state.tag_owner(1), Some(0), "the tag left is kept");
     }
 
@@ -983,13 +1002,25 @@ mod tests {
     fn dialog_is_sized_beside_its_parent_and_clamped_to_min() {
         // A GPS-style dialog asking for the whole output above a 1000x600
         // parent: capped at 3/5 of the parent, not at the parent's size.
-        assert_eq!(fit_beside_parent((1000, 600), (1000, 600), (0, 0, 0, 0)), (600, 360));
+        assert_eq!(
+            fit_beside_parent((1000, 600), (1000, 600), (0, 0, 0, 0)),
+            (600, 360)
+        );
         // The min hint wins over the cap.
-        assert_eq!(fit_beside_parent((1000, 600), (1000, 600), (700, 0, 0, 0)), (700, 360));
+        assert_eq!(
+            fit_beside_parent((1000, 600), (1000, 600), (700, 0, 0, 0)),
+            (700, 360)
+        );
         // A max hint below the cap wins.
-        assert_eq!(fit_beside_parent((1000, 600), (1000, 600), (0, 0, 300, 0)), (300, 360));
+        assert_eq!(
+            fit_beside_parent((1000, 600), (1000, 600), (0, 0, 300, 0)),
+            (300, 360)
+        );
         // Small dialogs are left alone.
-        assert_eq!(fit_beside_parent((1000, 600), (300, 200), (0, 0, 0, 0)), (300, 200));
+        assert_eq!(
+            fit_beside_parent((1000, 600), (300, 200), (0, 0, 0, 0)),
+            (300, 200)
+        );
     }
 
     #[test]

@@ -11,16 +11,15 @@ use std::sync::Arc;
 use log::info;
 use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 use nix::sys::eventfd::{EfdFlags, EventFd};
-use wayland_protocols::wp::cursor_shape::v1::client::{
-    wp_cursor_shape_device_v1::WpCursorShapeDeviceV1, wp_cursor_shape_manager_v1::WpCursorShapeManagerV1,
-};
 use wayland_client::{
     delegate_noop,
     globals::registry_queue_init,
-    protocol::{
-        wl_pointer::WlPointer, wl_registry, wl_seat::WlSeat, wl_surface::WlSurface,
-    },
+    protocol::{wl_pointer::WlPointer, wl_registry, wl_seat::WlSeat, wl_surface::WlSurface},
     Connection as WlConnection, Dispatch, QueueHandle,
+};
+use wayland_protocols::wp::cursor_shape::v1::client::{
+    wp_cursor_shape_device_v1::WpCursorShapeDeviceV1,
+    wp_cursor_shape_manager_v1::WpCursorShapeManagerV1,
 };
 
 use crate::config::Config;

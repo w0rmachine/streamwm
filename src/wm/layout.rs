@@ -168,10 +168,7 @@ pub fn placements(state: &State, config: &Config) -> Vec<(u32, Placement)> {
 
     let (mut hidden, mut tiled_out, mut floats) = (Vec::new(), Vec::new(), Vec::new());
     for w in &state.windows {
-        let tiled_geom = tiled
-            .iter()
-            .find(|(wid, _)| *wid == w.id)
-            .map(|(_, g)| *g);
+        let tiled_geom = tiled.iter().find(|(wid, _)| *wid == w.id).map(|(_, g)| *g);
         let placement = match tiled_geom {
             _ if w.minimized || !state.window_is_visible(w) => Placement::Hidden,
             _ if w.fullscreen => Placement::Fullscreen,
@@ -368,7 +365,10 @@ mod tests {
                 vec![
                     (hidden, Placement::Hidden),
                     (other, Placement::Hidden),
-                    (tiled, Placement::At(geometry_of(&state, &config, tiled).unwrap())),
+                    (
+                        tiled,
+                        Placement::At(geometry_of(&state, &config, tiled).unwrap())
+                    ),
                     (
                         float,
                         Placement::At(Geometry {

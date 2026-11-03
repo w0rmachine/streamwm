@@ -820,7 +820,10 @@ mod tests {
         let (state, mut data) = app();
         apply_command(&mut data, Command::FocusTag(4, None));
         assert_eq!(state.borrow().tag_owner(4), Some(0), "tag created");
-        assert!(state.borrow().pending_apply, "command marks state for a manage");
+        assert!(
+            state.borrow().pending_apply,
+            "command marks state for a manage"
+        );
 
         flush_pending(&mut data);
         assert!(!state.borrow().pending_apply, "requested exactly once");

@@ -44,12 +44,12 @@ pub mod layer_shell {
     //! Binding this global interface informs River that `streamwm` supports `wlr-layer-shell`,
     //! allowing external bars (Waybar, Quickshell) and background wallpapers (swaybg) to function.
     #![allow(unused_imports)]
-    use wayland_client;
-    use wayland_client::protocol::*;
     #[allow(unused_imports)]
     use crate::protocols::wm::__interfaces::*;
     #[allow(unused_imports)]
     use crate::protocols::wm::*;
+    use wayland_client;
+    use wayland_client::protocol::*;
 
     pub mod __interfaces {
         #![allow(unused_imports)]

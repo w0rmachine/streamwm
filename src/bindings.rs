@@ -8,13 +8,13 @@ use wayland_client::{Connection as WlConnection, Dispatch, Proxy, QueueHandle};
 
 use crate::connection::{AppData, OpKind, PointerOp};
 use crate::events::set_seat_cursor;
-use crate::protocols::wm::river_window_v1::Edges;
-use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape;
 use crate::protocols::wm::river_seat_v1::{Modifiers, RiverSeatV1};
+use crate::protocols::wm::river_window_v1::Edges;
 use crate::protocols::xkb_bindings::river_xkb_binding_v1::{
     Event as XkbBindingEvent, RiverXkbBindingV1,
 };
 use crate::protocols::xkb_bindings::river_xkb_bindings_v1::RiverXkbBindingsV1;
+use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape;
 
 /// Parse a keysym name into its xkbcommon keysym value.
 fn parse_keysym(name: &str) -> Option<u32> {
@@ -867,15 +867,36 @@ mod tests {
         assert_eq!(cursor_shape(OpKind::Resize, E::Top), Shape::NResize);
         assert_eq!(cursor_shape(OpKind::Resize, E::Bottom), Shape::SResize);
 
-        assert_eq!(cursor_shape(OpKind::Resize, E::Left | E::Right), Shape::EwResize);
-        assert_eq!(cursor_shape(OpKind::Resize, E::Top | E::Bottom), Shape::NsResize);
-        assert_eq!(cursor_shape(OpKind::Resize, E::Left | E::Top), Shape::NwseResize);
-        assert_eq!(cursor_shape(OpKind::Resize, E::Right | E::Bottom), Shape::NwseResize);
-        assert_eq!(cursor_shape(OpKind::Resize, E::Left | E::Bottom), Shape::NeswResize);
-        assert_eq!(cursor_shape(OpKind::Resize, E::Right | E::Top), Shape::NeswResize);
+        assert_eq!(
+            cursor_shape(OpKind::Resize, E::Left | E::Right),
+            Shape::EwResize
+        );
+        assert_eq!(
+            cursor_shape(OpKind::Resize, E::Top | E::Bottom),
+            Shape::NsResize
+        );
+        assert_eq!(
+            cursor_shape(OpKind::Resize, E::Left | E::Top),
+            Shape::NwseResize
+        );
+        assert_eq!(
+            cursor_shape(OpKind::Resize, E::Right | E::Bottom),
+            Shape::NwseResize
+        );
+        assert_eq!(
+            cursor_shape(OpKind::Resize, E::Left | E::Bottom),
+            Shape::NeswResize
+        );
+        assert_eq!(
+            cursor_shape(OpKind::Resize, E::Right | E::Top),
+            Shape::NeswResize
+        );
 
         // Two opposite edges plus a third: an axis resize still wins.
-        assert_eq!(cursor_shape(OpKind::Resize, E::Left | E::Right | E::Top), Shape::EwResize);
+        assert_eq!(
+            cursor_shape(OpKind::Resize, E::Left | E::Right | E::Top),
+            Shape::EwResize
+        );
     }
 
     #[test]

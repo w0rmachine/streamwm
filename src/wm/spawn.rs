@@ -7,7 +7,10 @@
 //! Spawns child processes detached with null stdio handles and reaps exited children
 //! on dedicated background threads to prevent zombie process leakage.
 
-use std::{process::{Command, Stdio}, thread};
+use std::{
+    process::{Command, Stdio},
+    thread,
+};
 
 /// Spawns an arbitrary command string detached from streamwm.
 /// Automatically selects direct binary execution for simple commands or `$SHELL -c` for shell strings.
