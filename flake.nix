@@ -25,18 +25,24 @@
           extensions = [ "rust-src" ];
         };
 
+        # Single source of truth: the Cargo manifest. Bumping it is all a
+        # release needs; the flake used to drift (0.5.2 vs 0.5.4).
+        streamwmVersion = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
+
         # Build streamwm from the local source tree.
         streamwm = pkgs.rustPlatform.buildRustPackage {
           pname = "streamwm";
-          version = "0.5.2";
+          version = streamwmVersion;
           src = self;
           cargoLock = { lockFile = ./Cargo.lock; };
           nativeBuildInputs = with pkgs; [
             rust # ensure wayland-scanner proc macros resolve
             pkg-config
+            wayland-scanner
           ];
           buildInputs = with pkgs; [
             wayland
+            wayland-protocols # cursor-shape-v1 (staging) for the WM pointer
             # zbus needs no system libs, but wayland-backend may link libwayland
           ];
           # Keep the dependency tree fresh; nixpkgs will fetch from crates.io.
