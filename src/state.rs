@@ -554,15 +554,13 @@ impl State {
         self.mark_dirty();
     }
 
-    /// Make `tag` the active tag of `output_idx`, deleting the previously
-    /// active tag if it is now empty.
+    /// Make `tag` the active tag of `output_idx`. The tag left behind keeps
+    /// its output even when empty: dropping it leaves the output tagless, and
+    /// `normalize_outputs` then gives it the lowest free tag index instead.
     fn activate_tag(&mut self, output_idx: usize, tag: usize) {
         let old = self.outputs[output_idx].active_tag;
         self.outputs[output_idx].active_tag = tag;
         self.clear_fullscreen_on_tag(old);
-        if old != tag {
-            self.delete_tag_if_empty(output_idx, old);
-        }
         self.refocus_output(output_idx);
     }
 
@@ -600,15 +598,6 @@ impl State {
             if window.node.is_some() && !active.contains(&window.tag) {
                 window.node = None;
             }
-        }
-    }
-
-    /// Unassign `tag` from `output_idx` if no window is on it anymore.
-    fn delete_tag_if_empty(&mut self, output_idx: usize, tag: usize) {
-        if self.tags.get(tag).and_then(|t| t.output) == Some(output_idx)
-            && !self.windows.iter().any(|w| w.tag == tag)
-        {
-            self.tags[tag].output = None;
         }
     }
 
@@ -897,6 +886,35 @@ mod tests {
         assert!(!state.window_is_visible(state.find_window(wid).unwrap()));
         assert_eq!(state.find_window(wid).unwrap().tag, 2);
         assert_eq!(state.tag_owner(2), Some(0));
+    }
+
+    #[test]
+    fn an_emptied_tag_keeps_its_output() {
+        // d640386 deleted a tag emptied by send_to_tag. The output was then
+        // tagless, and normalize_outputs gives a tagless output the lowest
+        // free tag index, so windows went to a tag the user never opened.
+        let mut state = tags_only(1);
+        let mut w = null_window(0);
+        w.tag = 0;
+        let wid = w.id;
+        state.windows.push(w);
+        state.outputs[0].focused_window = Some(wid);
+        state.send_focused_to_tag(0, 1);
+        assert_eq!(state.tag_owner(0), Some(0));
+        assert_eq!(state.outputs[0].active_tag, 0);
+    }
+
+    #[test]
+    fn empty_tag_loses_its_output_but_comes_back_there() {
+        // The output must return to the tag it was on, not to a free index.
+        let mut state = tags_only(1);
+        state.focus_tag(0, 1);
+        assert_eq!(state.focus_tag(0, 0), ());
+        assert_eq!(state.tag_owner(1), Some(0), "1 still has the output");
+        state.focus_tag(0, 1);
+        state.focus_tag(0, 0);
+        assert_eq!(state.outputs[0].active_tag, 0, "back on 0, not on a free tag");
+        assert_eq!(state.tag_owner(1), Some(0), "the tag left is kept");
     }
 
     fn null_window(tag: usize) -> Window {
