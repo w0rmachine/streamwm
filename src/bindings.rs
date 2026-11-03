@@ -7,6 +7,9 @@
 use wayland_client::{Connection as WlConnection, Dispatch, Proxy, QueueHandle};
 
 use crate::connection::{AppData, OpKind, PointerOp};
+use crate::events::set_seat_cursor;
+use crate::protocols::wm::river_window_v1::Edges;
+use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape;
 use crate::protocols::wm::river_seat_v1::{Modifiers, RiverSeatV1};
 use crate::protocols::xkb_bindings::river_xkb_binding_v1::{
     Event as XkbBindingEvent, RiverXkbBindingV1,
@@ -663,11 +666,48 @@ pub fn end_pointer_op(data: &mut AppData) {
     }
 }
 
+/// Cursor shape to show while an interactive operation runs.
+///
+/// river v4 shows the cursor the WM sets on the seat's `wl_pointer` whenever no
+/// client has pointer focus, which is the whole time a pointer op runs, so the
+/// WM has to set one or the compositor's default (arrow) is shown.
+pub fn cursor_shape(kind: OpKind, edges: Edges) -> Shape {
+    use Edges as E;
+    use Shape::*;
+    match kind {
+        OpKind::Move => Move,
+        OpKind::Resize => {
+            let (h, v) = (edges.contains(E::Left), edges.contains(E::Right));
+            let (t, b) = (edges.contains(E::Top), edges.contains(E::Bottom));
+            // Shapes name the edge being dragged, as the CSS cursors do.
+            match (h, v, t, b) {
+                // Both axes: an edge resize, or (all four) a frame.
+                (true, true, true, true) => AllResize,
+                (true, true, _, _) => EwResize,
+                (_, _, true, true) => NsResize,
+                (true, false, true, false) => NwseResize,
+                (true, false, false, true) => NeswResize,
+                (false, true, true, false) => NeswResize,
+                (false, true, false, true) => NwseResize,
+                (true, false, _, _) => WResize,
+                (false, true, _, _) => EResize,
+                (false, false, true, false) => NResize,
+                (false, false, false, true) => SResize,
+                // A drag that hit no edge: let the user pick.
+                _ => AllResize,
+            }
+        }
+    }
+}
+
 /// Process queued pointer op start/end requests, called inside a manage
 /// sequence. Must be invoked between manage_start and manage_finish.
 pub fn process_pointer_ops(data: &mut AppData) {
     // Start a queued op.
     if let Some(op) = data.pending_op.take() {
+        // Set the cursor before the op starts so river never shows the
+        // default arrow for a frame.
+        set_seat_cursor(&data.state, &op.seat, cursor_shape(op.kind, op.edges));
         op.seat.op_start_pointer();
         data.pointer_op = Some(op);
     }

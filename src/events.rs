@@ -17,6 +17,7 @@ use crate::protocols::layer_shell::river_layer_shell_output_v1::{
 use crate::protocols::wm::river_output_v1::{Event as OutputEvent, RiverOutputV1};
 use crate::protocols::wm::river_seat_v1::{Event as SeatEvent, RiverSeatV1};
 use crate::protocols::wm::river_window_v1::{Event as WindowEvent, RiverWindowV1};
+use crate::state::State;
 
 /// Dispatch implementation for window events dispatched by `RiverWindowV1`.
 impl Dispatch<RiverWindowV1, ()> for AppData {
@@ -470,6 +471,45 @@ impl Dispatch<WlOutput, u32> for AppData {
                 output.name = Some(name);
             }
         }
+    }
+}
+
+/// Focus `wid` and the tag/output it lives on, unless it is already there.
+///
+/// Goes through [`State::switch_active_tag`] rather than setting `active_tag`
+/// directly: switching a tag must clear fullscreen on the tag left behind, or
+/// river keeps drawing the fullscreen window over both tags.
+fn focus_window_on_output(state: &mut State, wid: u32) -> bool {
+    let Some(w) = state.find_window(wid) else {
+        return false;
+    };
+    let tag = w.tag;
+    let Some(output) = state.tag_owner(tag).filter(|o| *o < state.outputs.len()) else {
+        return false;
+    };
+    if state.focused_output == Some(output)
+        && state.outputs[output].active_tag == tag
+        && state.outputs[output].focused_window == Some(wid)
+    {
+        return false;
+    }
+    state.focused_output = Some(output);
+    state.outputs[output].focused_window = Some(wid);
+    state.switch_active_tag(output, tag);
+    true
+}
+
+/// Set the pointer cursor river shows while no client has pointer focus.
+///
+/// The seat is looked up by object id, since `State::seats` can be reordered
+/// or emptied (seat removal) independently of the op that references it.
+pub fn set_seat_cursor(
+    state: &std::cell::RefCell<State>,
+    seat: &RiverSeatV1,
+    shape: wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape,
+) {
+    if let Some(seat) = state.borrow().seats.iter().find(|s| s.proxy.id() == seat.id()) {
+        seat.set_cursor(shape);
     }
 }
 

@@ -193,6 +193,14 @@ pub struct Seat {
     /// Layer-shell seat state (created once via get_seat).
     pub layer:
         Option<crate::protocols::layer_shell::river_layer_shell_seat_v1::RiverLayerShellSeatV1>,
+    /// `wl_pointer` of the seat's `wl_seat`: river shows the cursor the WM
+    /// sets here whenever no client has pointer focus (during pointer ops).
+    pub pointer: Option<wayland_client::protocol::wl_pointer::WlPointer>,
+    /// `wp_cursor_shape_v1` device for that pointer, when the compositor
+    /// supports cursor-shape (no buffers or theme needed).
+    pub cursor_shape: Option<
+        wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::WpCursorShapeDeviceV1,
+    >,
 }
 
 impl Seat {
@@ -203,6 +211,35 @@ impl Seat {
             pointer_y: 0,
             pointer_window: None,
             layer: None,
+            pointer: None,
+            cursor_shape: None,
+        }
+    }
+
+    /// Show `shape` (e.g. move, resize) as the WM's cursor, falling back to
+    /// the compositor's default when the compositor has no cursor-shape.
+    pub fn set_cursor(
+        &self,
+        shape: wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::Shape,
+    ) {
+        let Some(pointer) = &self.pointer else {
+            return;
+        };
+        match &self.cursor_shape {
+            Some(device) => device.set_shape(0, shape),
+            // A null cursor surface makes the compositor use its default.
+            None => pointer.set_cursor(0, None, 0, 0),
+        }
+    }
+}
+
+impl Drop for Seat {
+    fn drop(&mut self) {
+        if let Some(device) = &self.cursor_shape {
+            device.destroy();
+        }
+        if let Some(pointer) = &self.pointer {
+            pointer.release();
         }
     }
 }
@@ -213,7 +250,7 @@ impl Seat {
 /// `removed` is the index of the removed output, and `remaining` is the number
 /// of outputs left after removal. Tags owned by the removed output migrate to
 /// the first remaining output (index 0), and owners above `removed` shift down.
-fn remap_tag_owners(owners: &mut [Option<usize>], removed: usize, remaining: usize) {
+pub(crate) fn remap_tag_owners(owners: &mut [Option<usize>], removed: usize, remaining: usize) {
     for owner in owners.iter_mut() {
         match *owner {
             None => {}

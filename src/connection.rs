@@ -11,10 +11,15 @@ use std::sync::Arc;
 use log::info;
 use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 use nix::sys::eventfd::{EfdFlags, EventFd};
+use wayland_protocols::wp::cursor_shape::v1::client::{
+    wp_cursor_shape_device_v1::WpCursorShapeDeviceV1, wp_cursor_shape_manager_v1::WpCursorShapeManagerV1,
+};
 use wayland_client::{
     delegate_noop,
     globals::registry_queue_init,
-    protocol::{wl_registry, wl_seat::WlSeat, wl_surface::WlSurface},
+    protocol::{
+        wl_pointer::WlPointer, wl_registry, wl_seat::WlSeat, wl_surface::WlSurface,
+    },
     Connection as WlConnection, Dispatch, QueueHandle,
 };
 
@@ -35,6 +40,9 @@ pub struct AppData {
     pub wm: Option<RiverWindowManagerV1>,
     /// Bound `river_xkb_bindings_v1` global proxy for keybindings.
     pub xkb: Option<RiverXkbBindingsV1>,
+    /// Bound `wp_cursor_shape_manager_v1`, if the compositor has it: lets
+    /// streamwm set a move/resize cursor without shipping cursor buffers.
+    pub cursor_shape: Option<WpCursorShapeManagerV1>,
     /// Bound `river_layer_shell_v1` global proxy signaling layer shell compatibility.
     pub layer_shell: Option<RiverLayerShellV1>,
     /// Active runtime configuration reference.
@@ -116,6 +124,7 @@ impl AppData {
             state,
             wm: None,
             xkb: None,
+            cursor_shape: None,
             layer_shell: None,
             config,
             quit: false,
@@ -245,6 +254,12 @@ fn bind_globals(
 
     if let Ok(xkb) = globals.bind::<RiverXkbBindingsV1, _, ()>(qh, 1..=3, ()) {
         data.xkb = Some(xkb);
+    }
+
+    // Optional: cursor shapes. Without it the WM cursor is the compositor's
+    // default (null surface), and a resize drag shows an arrow.
+    if let Ok(manager) = globals.bind::<WpCursorShapeManagerV1, _, ()>(qh, 1..=2, ()) {
+        data.cursor_shape = Some(manager);
     }
 
     // Bind layer-shell; without it the compositor closes all wlr-layer-shell
@@ -385,6 +400,9 @@ delegate_noop!(AppData: ignore RiverNodeV1);
 delegate_noop!(AppData: ignore RiverXkbBindingsV1);
 delegate_noop!(AppData: ignore WlSeat);
 delegate_noop!(AppData: ignore WlSurface);
+delegate_noop!(AppData: ignore WlPointer);
+delegate_noop!(AppData: ignore WpCursorShapeManagerV1);
+delegate_noop!(AppData: ignore WpCursorShapeDeviceV1);
 delegate_noop!(AppData: ignore crate::protocols::layer_shell::river_layer_shell_v1::RiverLayerShellV1);
 delegate_noop!(AppData: ignore crate::protocols::layer_shell::river_layer_shell_seat_v1::RiverLayerShellSeatV1);
 
