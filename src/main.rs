@@ -51,10 +51,8 @@ const MAX_RESTART_DELAY: Duration = Duration::from_secs(4);
 /// Main entry point for `streamwm`. Initializes logging, inspects CLI flags to determine
 /// whether to run as supervisor or worker process, and executes the designated mode.
 fn main() -> ExitCode {
-    if std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", "info");
-    }
-    env_logger::init();
+    // Read the level once at init; no env mutation (unsafe in edition 2024).
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let mut args = std::env::args_os().skip(1);
     if args.next().as_deref() == Some(std::ffi::OsStr::new(WORKER_ARG)) {
@@ -125,7 +123,9 @@ fn supervise(args: Vec<OsString>) -> ExitCode {
         }
         failures.push_back(now);
 
-        if failures.len() >= MAX_RESTARTS_IN_WINDOW {
+        // `failures` includes the failure just recorded: give up only once
+        // strictly more than the allowed number happened in the window.
+        if failures.len() > MAX_RESTARTS_IN_WINDOW {
             log::error!(
                 "streamwm worker failed {MAX_RESTARTS_IN_WINDOW} times within {}s; giving up",
                 RESTART_WINDOW.as_secs()
