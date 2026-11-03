@@ -138,8 +138,10 @@ pub fn bind_for_seat(data: &mut AppData, xkb: &RiverXkbBindingsV1, seat: &RiverS
     let binds = default_bindings(&data.config);
 
     for (keysym, mods, action) in binds {
+        // A typo'd or unsupported keysym must cost only that one binding,
+        // never the rest of the set.
         let Some(ks) = parse_keysym(&keysym) else {
-            log::warn!("unknown keysym `{keysym}`, skipping binding");
+            log::warn!("unknown keysym `{keysym}`, skipping `{action}`");
             continue;
         };
         let m = parse_modifiers(&mods, &modifier);
@@ -387,9 +389,6 @@ fn run_action(data: &mut AppData, action: &str) {
         }
         "resize_step_left" | "resize_step_right" => {
             let mut s = data.state.borrow_mut();
-            if !s.resize_mode {
-                return;
-            }
             // Resize the master fraction of the *active tag*, so the split is
             // remembered per tag rather than shared across the whole session.
             let step = data.config.resize_step;
@@ -398,10 +397,15 @@ fn run_action(data: &mut AppData, action: &str) {
             } else {
                 -step
             };
-            if let Some(o) = s.active_output() {
-                let active_tag = s.outputs[o].active_tag;
-                let cur = s.master_fraction(active_tag);
-                s.set_master_fraction(active_tag, cur + delta);
+            if s.resize_mode {
+                if let Some(o) = s.active_output() {
+                    let active_tag = s.outputs[o].active_tag;
+                    let cur = s.master_fraction(active_tag);
+                    s.set_master_fraction(active_tag, cur + delta);
+                    // A fullscreen window hides the split change; leave
+                    // fullscreen the moment the user starts adjusting it.
+                    s.clear_fullscreen_on_tag(active_tag);
+                }
             }
             needs_manage = true;
         }
@@ -468,22 +472,20 @@ fn start_pointer_op(
         return;
     };
 
-    // Find the floating window under the pointer and its seat.
+    // Find the floating window under the pointer and the seat whose pointer is
+    // over it. The op must run on that seat: a different seat (e.g. a second
+    // pointer) would drive it, so the pressing seat could never end it.
     let (wid, seat, px, py) = {
         let state = data.state.borrow();
-        let mut found = None;
-        for seat in state.seats.iter() {
-            if let Some(wid) = seat.pointer_window {
-                if state.find_window(wid).map(|w| w.floating).unwrap_or(false) {
-                    found = Some((wid, seat.proxy.clone(), seat.pointer_x, seat.pointer_y));
-                    break;
-                }
-            }
-        }
-        let Some(found) = found else {
+        let Some((seat, wid)) = state
+            .seats
+            .iter()
+            .find_map(|s| s.pointer_window.map(|w| (s, w)))
+            .filter(|(_, w)| state.find_window(*w).is_some_and(|w| w.floating))
+        else {
             return;
         };
-        found
+        (wid, seat.proxy.clone(), seat.pointer_x, seat.pointer_y)
     };
 
     let (fx, fy, fw, fh) = {
@@ -624,7 +626,6 @@ pub fn apply_pointer_delta(data: &mut AppData, dx: i32, dy: i32) {
             w.float_y = sfy + (dy - sy);
         }
         OpKind::Resize => {
-            use crate::protocols::wm::river_window_v1::Edges;
             let edx = dx - sx;
             let edy = dy - sy;
             // Grow/shrink in the direction of the dragged edge; dragging a
@@ -716,6 +717,9 @@ pub fn process_pointer_ops(data: &mut AppData) {
         data.op_end_requested = false;
         if let Some(op) = data.pointer_op.take() {
             op.seat.op_end();
+            // Back to the default, or the resize/move shape sticks around
+            // whenever no client has pointer focus.
+            set_seat_cursor(&data.state, &op.seat, Shape::Default);
         }
     }
 }
@@ -847,6 +851,31 @@ mod tests {
         assert!(!is_resize_binding("enter_resize_mode"));
         assert!(!is_resize_binding("focus_next"));
         assert!(!is_resize_binding("spawn"));
+    }
+
+    #[test]
+    fn move_and_resize_drags_get_a_matching_cursor() {
+        use Edges as E;
+        assert_eq!(cursor_shape(OpKind::Move, E::empty()), Shape::Move);
+
+        let all = E::Top | E::Bottom | E::Left | E::Right;
+        assert_eq!(cursor_shape(OpKind::Resize, all), Shape::AllResize);
+        assert_eq!(cursor_shape(OpKind::Resize, E::empty()), Shape::AllResize);
+
+        assert_eq!(cursor_shape(OpKind::Resize, E::Left), Shape::WResize);
+        assert_eq!(cursor_shape(OpKind::Resize, E::Right), Shape::EResize);
+        assert_eq!(cursor_shape(OpKind::Resize, E::Top), Shape::NResize);
+        assert_eq!(cursor_shape(OpKind::Resize, E::Bottom), Shape::SResize);
+
+        assert_eq!(cursor_shape(OpKind::Resize, E::Left | E::Right), Shape::EwResize);
+        assert_eq!(cursor_shape(OpKind::Resize, E::Top | E::Bottom), Shape::NsResize);
+        assert_eq!(cursor_shape(OpKind::Resize, E::Left | E::Top), Shape::NwseResize);
+        assert_eq!(cursor_shape(OpKind::Resize, E::Right | E::Bottom), Shape::NwseResize);
+        assert_eq!(cursor_shape(OpKind::Resize, E::Left | E::Bottom), Shape::NeswResize);
+        assert_eq!(cursor_shape(OpKind::Resize, E::Right | E::Top), Shape::NeswResize);
+
+        // Two opposite edges plus a third: an axis resize still wins.
+        assert_eq!(cursor_shape(OpKind::Resize, E::Left | E::Right | E::Top), Shape::EwResize);
     }
 
     #[test]
