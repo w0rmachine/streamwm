@@ -6,7 +6,10 @@
 //! - `WlOutput`: Name
 
 use wayland_client::{
-    protocol::wl_output::{Event as WlOutputEvent, WlOutput},
+    protocol::{
+        wl_output::{Event as WlOutputEvent, WlOutput},
+        wl_seat::WlSeat,
+    },
     Connection as WlConnection, Dispatch, Proxy, QueueHandle,
 };
 
@@ -93,25 +96,38 @@ impl Dispatch<RiverWindowV1, ()> for AppData {
                 let should_float = app_id
                     .as_deref()
                     .is_some_and(|a| data.config.is_floating_app(a));
-                let center = if should_float {
+                let area = if should_float {
                     state
                         .find_window(id)
-                        .and_then(|w| state.tag_owner(w.tag))
+                        .and_then(|w| state.window_output(w))
                         .and_then(|o| state.outputs.get(o))
-                        .map(|out| (out.x + out.width as i32 / 2, out.y + out.height as i32 / 2))
+                        .map(crate::state::output_area)
                 } else {
                     None
                 };
                 if let Some(w) = state.find_window_mut(id) {
-                    if should_float {
+                    if should_float && !w.floating {
                         w.floating = true;
-                        if let Some((cx, cy)) = center {
-                            w.float_x = cx - w.float_w as i32 / 2;
-                            w.float_y = cy - w.float_h as i32 / 2;
+                        // Fit inside the panel-free area: some floating apps
+                        // (password prompts, portals) request an output-sized
+                        // surface, which would then be clamped to the corner.
+                        if let Some((ax, ay, aw, ah)) = area {
+                            let (fw, fh) = crate::state::fit_beside_parent(
+                                (aw, ah),
+                                (w.float_w, w.float_h),
+                                (w.min_width, w.min_height, w.max_width, w.max_height),
+                            );
+                            w.float_w = fw;
+                            w.float_h = fh;
+                            let (x, y) =
+                                crate::state::place_over_parent(fw, fh, ax, ay, aw, ah, (ax, ay, aw, ah));
+                            w.float_x = x;
+                            w.float_y = y;
                         }
                     }
                     w.app_id = app_id;
                 }
+                state.mark_dirty();
             }
             WindowEvent::Title { title } => {
                 if let Some(w) = state.find_window_mut(id) {
@@ -149,19 +165,43 @@ impl Dispatch<RiverWindowV1, ()> for AppData {
                         .windows
                         .iter()
                         .find(|w| w.proxy.id() == pid)
-                        .map(|w| (w.id, w.floating, w.float_x, w.float_y, w.float_w, w.float_h))
+                        .map(|w| {
+                            let area = state
+                                .window_output(w)
+                                .and_then(|o| state.outputs.get(o))
+                                .map(crate::state::output_area)
+                                .unwrap_or((w.float_x, w.float_y, w.float_w, w.float_h));
+                            (w.id, w.floating, w.float_x, w.float_y, w.float_w, w.float_h, area)
+                        })
                 });
-                if let Some(w) = state.find_window_mut(id) {
-                    w.parent = parent_geom.as_ref().map(|(pid, ..)| *pid);
-                    if let Some((_, floating, px, py, pw, ph)) = parent_geom {
-                        if floating && !w.floating {
-                            // Center the dialog over its floating parent.
-                            w.floating = true;
-                            w.float_x = px + pw as i32 / 2 - w.float_w as i32 / 2;
-                            w.float_y = py + ph as i32 / 2 - w.float_h as i32 / 2;
-                        }
+                if let Some((pid, floating, px, py, pw, ph, area)) = parent_geom {
+                    let child = state
+                        .find_window(id)
+                        .map(|w| (w.min_width, w.min_height, w.max_width, w.max_height))
+                        .unwrap_or_default();
+                    let Some(w) = state.find_window_mut(id) else {
+                        return;
+                    };
+                    let (min_w, min_h, max_w, max_h) = child;
+                    w.parent = Some(pid);
+                    if floating && !w.floating {
+                        // Overlay the dialog on its floating parent, sized so
+                        // the parent stays visible around it (GPS-size dialogs
+                        // and portals otherwise cover it completely).
+                        let (fw, fh) = crate::state::fit_beside_parent(
+                            (pw, ph),
+                            (w.float_w, w.float_h),
+                            (min_w, min_h, max_w, max_h),
+                        );
+                        w.floating = true;
+                        w.float_w = fw;
+                        w.float_h = fh;
+                        let (x, y) = crate::state::place_over_parent(fw, fh, px, py, pw, ph, area);
+                        w.float_x = x;
+                        w.float_y = y;
                     }
                 }
+                state.mark_dirty();
             }
             WindowEvent::FullscreenRequested { .. } => {
                 // Honor a client-initiated fullscreen request (e.g. the `f`/
@@ -219,36 +259,44 @@ impl Dispatch<RiverOutputV1, ()> for AppData {
     ) {
         let oid = output.id();
         let mut state = data.state.borrow_mut();
-        let Some(idx) = state.outputs.iter().position(|o| o.proxy.id() == oid) else {
-            return;
-        };
+        // Output indices shift when one is removed, so every arm re-finds its
+        // output by object id instead of holding an index across mutations.
+        let idx = || state.outputs.iter().position(|o| o.proxy.id() == oid);
         let mut changed = false;
         match event {
             OutputEvent::Position { x, y } => {
-                state.outputs[idx].x = x;
-                state.outputs[idx].y = y;
-                state.repair_outputs();
-                changed = true;
+                if let Some(idx) = idx() {
+                    state.outputs[idx].x = x;
+                    state.outputs[idx].y = y;
+                    state.repair_outputs();
+                    changed = true;
+                }
             }
             OutputEvent::Dimensions { width, height } => {
-                state.outputs[idx].width = width as u32;
-                state.outputs[idx].height = height as u32;
-                state.repair_outputs();
-                changed = true;
+                if let Some(idx) = idx() {
+                    state.outputs[idx].width = width as u32;
+                    state.outputs[idx].height = height as u32;
+                    state.repair_outputs();
+                    changed = true;
+                }
             }
             OutputEvent::WlOutput { name } => {
-                state.outputs[idx].wl_global = Some(name);
                 if let (Some(registry), Some(qh)) = (data.registry.clone(), data.qh.clone()) {
                     let wl_output = registry.bind::<WlOutput, _, _>(name, 4, &qh, name);
-                    state.outputs[idx].wl_output = Some(wl_output);
+                    if let Some(idx) = idx() {
+                        state.outputs[idx].wl_global = Some(name);
+                        state.outputs[idx].wl_output = Some(wl_output);
+                    }
                 }
             }
             OutputEvent::Removed => {
                 // Migrate this output's tags to the first remaining output and
-                // recompute focus.
-                state.remove_output(idx);
-                data.layer_default_set = false;
-                changed = true;
+                // recompute focus. Nothing may touch `idx` afterwards.
+                if let Some(idx) = idx() {
+                    state.remove_output(idx);
+                    data.layer_default_set = false;
+                    changed = true;
+                }
             }
         }
         drop(state);
@@ -360,7 +408,26 @@ impl Dispatch<RiverSeatV1, ()> for AppData {
         let mut state = data.state.borrow_mut();
         let mut output_focus_changed = false;
 
+        // Cursor: bind this seat's wl_seat and take a wl_pointer from it. River
+        // shows what the WM sets on it whenever no client has pointer focus,
+        // i.e. during pointer operations. Each seat gets a fresh bind (river
+        // keeps a 1:1 river_seat_v1 <-> wl_seat mapping).
         match event {
+            SeatEvent::WlSeat { name } => {
+                if let (Some(registry), Some(qh)) = (data.registry.clone(), data.qh.clone()) {
+                    let wl_seat = registry.bind::<WlSeat, _, _>(name, 4, &qh, ());
+                    let pointer = wl_seat.get_pointer(&qh, ());
+                    let shape = data
+                        .cursor_shape
+                        .clone()
+                        .map(|manager| manager.get_pointer(&pointer, &qh, ()));
+                    if let Some(seat) = state.seats.iter_mut().find(|s| s.proxy.id() == sid) {
+                        seat.pointer = Some(pointer);
+                        seat.cursor_shape = shape;
+                    }
+                }
+                return;
+            }
             SeatEvent::PointerEnter { window } => {
                 if let Some(wid) = state.find_window_by_proxy(&window) {
                     if let Some(seat) = state.seats.iter_mut().find(|s| s.proxy.id() == sid) {
@@ -369,16 +436,8 @@ impl Dispatch<RiverSeatV1, ()> for AppData {
                 }
                 if data.config.focus_follows_mouse {
                     if let Some(wid) = state.find_window_by_proxy(&window) {
-                        // Focus switches to the window under the pointer, and
-                        // thus to its tag's output.
-                        if let Some(tag) = state.find_window(wid).map(|w| w.tag) {
-                            if let Some(output) = state.tag_owner(tag) {
-                                if output < state.outputs.len() {
-                                    state.focused_output = Some(output);
-                                    state.outputs[output].focused_window = Some(wid);
-                                    state.switch_active_tag(output, tag);
-                                }
-                            }
+                        if focus_window_on_output(&mut state, wid) {
+                            request_manage(data);
                         }
                     }
                 }
@@ -390,20 +449,15 @@ impl Dispatch<RiverSeatV1, ()> for AppData {
             }
             SeatEvent::WindowInteraction { window } => {
                 // A pointer button press / touch on a window: focus it,
-                // regardless of focus-follows-mouse, and un-minimize it.
+                // regardless of focus-follows-mouse, and restore it if it was
+                // minimized (river sends this even for a hidden window, e.g.
+                // from a taskbar, so this is the only way back). River starts a
+                // manage sequence after this event, so no extra request.
                 if let Some(wid) = state.find_window_by_proxy(&window) {
                     if let Some(w) = state.find_window_mut(wid) {
                         w.minimized = false;
                     }
-                    if let Some(tag) = state.find_window(wid).map(|w| w.tag) {
-                        if let Some(output) = state.tag_owner(tag) {
-                            if output < state.outputs.len() {
-                                state.focused_output = Some(output);
-                                state.outputs[output].focused_window = Some(wid);
-                                state.switch_active_tag(output, tag);
-                            }
-                        }
-                    }
+                    focus_window_on_output(&mut state, wid);
                 }
             }
             SeatEvent::PointerPosition { x, y } => {
