@@ -386,6 +386,12 @@ impl Dispatch<RiverWindowManagerV1, ()> for AppData {
 }
 
 // Registry: the user-data is GlobalListContents, provided by registry_queue_init.
+//
+// This impl must stay bare-bodied and keep the default `State = Self`:
+// `registry_queue_init` dispatches the registry through this exact (supertrait)
+// impl. Real global handling is done by `GlobalList`; a second, concrete impl
+// for the same interface would also send `global`/`global_remove` to `event()`
+// and double-add/double-remove every global.
 impl Dispatch<wl_registry::WlRegistry, wayland_client::globals::GlobalListContents> for AppData {
     fn event(
         _data: &mut Self,
