@@ -616,6 +616,21 @@ pub fn refresh_snapshot(data: &crate::connection::AppData) {
     }
 }
 
+/// Apply a state change made by any source (a socket command, a libinput or
+/// D-Bus event, ...) once, in one place: if the state says a manage sequence is
+/// needed, request one. Without this, changes not driven by a keybinding —
+/// notably socket commands — never reach the compositor.
+pub fn flush_pending(data: &mut crate::connection::AppData) {
+    let pending = data.state.borrow().pending_apply;
+    if !pending {
+        return;
+    }
+    data.state.borrow_mut().pending_apply = false;
+    if let Some(wm) = &data.wm {
+        wm.manage_dirty();
+    }
+}
+
 /// Answer pending on-demand snapshot requests from socket client threads.
 pub fn service_status_requests(
     requests: &mpsc::Receiver<StatusRequest>,
@@ -634,6 +649,55 @@ pub fn service_status_requests(
 mod tests {
     use super::*;
     use serde_json::json;
+    use wayland_client::Proxy;
+
+    /// A proxy of any river type. The backend has nothing on the other end of
+    /// its socket; requests sent through it are encoded and dropped, which is
+    /// all these tests need (they only read state).
+    fn proxy<P: Proxy>() -> P {
+        thread_local! {
+            static CONN: std::sync::Arc<wayland_backend::rs::client::Backend> =
+                std::sync::Arc::new(
+                    wayland_backend::rs::client::Backend::connect(
+                        std::os::unix::net::UnixStream::pair().unwrap().0,
+                    )
+                    .unwrap(),
+                );
+        }
+        P::from_id(
+            &wayland_client::Connection::from_backend(CONN.with(|b| (**b).clone())),
+            wayland_client::backend::ObjectId::null(),
+        )
+        .unwrap()
+    }
+
+    /// One output (600x400) with tag 0 active and a real `wm` handle.
+    fn app() -> (
+        std::rc::Rc<std::cell::RefCell<State>>,
+        crate::connection::AppData,
+    ) {
+        let mut state = State::new(0.55);
+        let mut out = crate::state::Output::new(proxy());
+        out.width = 600;
+        out.height = 400;
+        state.outputs.push(out);
+        state.assign_initial_tag(0);
+        state.pending_apply = false;
+        let state = std::rc::Rc::new(std::cell::RefCell::new(state));
+        let mut data = crate::connection::AppData::new(
+            state.clone(),
+            std::rc::Rc::new(crate::config::Config::default()),
+        );
+        data.wm = Some(proxy());
+        (state, data)
+    }
+
+    fn window(app_id: &str, title: &str) -> crate::state::Window {
+        let mut w = crate::state::Window::new(proxy(), 0);
+        w.app_id = Some(app_id.into());
+        w.title = Some(title.into());
+        w
+    }
 
     #[test]
     fn subscriber_publish_delivers_latest_snapshot() {

@@ -276,6 +276,9 @@ pub struct State {
     pub default_master_fraction: f64,
     /// Whether the WM is in resize mode (arrow keys resize the layout).
     pub resize_mode: bool,
+    /// Set by any state change the compositor must apply; consumed by the
+    /// event loop, which then requests a manage sequence.
+    pub pending_apply: bool,
 }
 
 impl State {
@@ -290,7 +293,15 @@ impl State {
             focused_output: None,
             default_master_fraction,
             resize_mode: false,
+            pending_apply: false,
         }
+    }
+
+    /// Mark the state as needing a manage sequence so river applies it.
+    /// State changes reach the compositor only through a manage pass, so every
+    /// mutation that the user should see must set this.
+    pub fn mark_dirty(&mut self) {
+        self.pending_apply = true;
     }
 
     /// Toggle modal resize mode, returning the new state. The key that enters

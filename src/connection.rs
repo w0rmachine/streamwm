@@ -182,6 +182,9 @@ pub fn run(config: &Config) -> Result<(), String> {
 
         service_control_commands(&command_rx, &mut data);
         service_status_requests(&data);
+        // State changed by anything other than a keybinding (socket commands,
+        // D-Bus, ...) reaches the compositor only through a manage sequence.
+        crate::status::flush_pending(&mut data);
 
         if data.quit {
             break;
