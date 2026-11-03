@@ -57,19 +57,31 @@ pub fn on_manage_start(data: &mut AppData, wm: &RiverWindowManagerV1) {
             .iter()
             .map(|output| output.proxy.clone())
             .collect();
-        let window_outputs: Vec<usize> = state
+        // Resolved per window before the mutable loop: a window whose tag has
+        // no owner left (its output was removed) lost fullscreen state.
+        let targets: Vec<(Option<usize>, bool)> = state
             .windows
             .iter()
-            .map(|w| state.tag_owner(w.tag).unwrap_or(0))
+            .map(|w| (state.window_output(w), state.tag_owner(w.tag).is_none()))
             .collect();
-        for (i, w) in state.windows.iter_mut().enumerate() {
+        let outputs_empty = state.outputs.is_empty();
+        for (w, (target, untagged)) in state.windows.iter_mut().zip(targets) {
+            if w.fullscreen_applied && untagged && !outputs_empty {
+                // The fullscreen output was removed: river has already exited
+                // fullscreen (see river_window_v1.fullscreen), so drop our flag
+                // or the next fullscreen toggle would be swallowed.
+                w.fullscreen = false;
+                w.fullscreen_applied = false;
+                w.proxy.inform_not_fullscreen();
+            }
+
             if !w.caps_set {
-                // Declare the window-management capabilities streamwm actually
-                // honors so apps hide unsupported buttons. We support fullscreen
-                // and minimize (hide); maximize has no distinct meaning in a
-                // tiling layout, and we do not show a window menu.
+                // Advertise the capabilities CSD apps check before drawing their
+                // header-bar buttons. Maximize requests are still ignored (a
+                // tiling WM has no distinct maximized state).
                 use crate::protocols::wm::river_window_v1::Capabilities;
-                let caps = Capabilities::Fullscreen | Capabilities::Minimize;
+                let caps =
+                    Capabilities::Fullscreen | Capabilities::Maximize | Capabilities::Minimize | Capabilities::WindowMenu;
                 w.proxy.set_capabilities(caps);
                 w.caps_set = true;
             }
@@ -85,7 +97,7 @@ pub fn on_manage_start(data: &mut AppData, wm: &RiverWindowManagerV1) {
 
             if w.fullscreen != w.fullscreen_applied {
                 if w.fullscreen {
-                    if let Some(output) = outputs.get(window_outputs[i]) {
+                    if let Some(output) = target.and_then(|o| outputs.get(o)) {
                         w.proxy.fullscreen(output);
                         // Inform the app so CSD titlebars update.
                         w.proxy.inform_fullscreen();
@@ -280,30 +292,34 @@ pub fn on_render_start(data: &mut AppData, wm: &RiverWindowManagerV1) {
     let started = std::time::Instant::now();
     log::trace!("render_start");
 
-    // Ensure visible windows have their render node (get_node, once).
+    // Ensure visible windows have their render node (get_node, once). Nodes of
+    // windows no longer on an active tag are released first, so this stays
+    // legal when a window becomes visible again.
     {
         let mut state = data.state.borrow_mut();
-        let qh = data.qh.clone().expect("qh not set");
-        let visible: Vec<bool> = state
-            .windows
-            .iter()
-            .map(|window| state.window_is_visible(window))
-            .collect();
-        let mut requested = 0usize;
-        for (window, visible) in state.windows.iter_mut().zip(visible) {
-            if window.node.is_none() {
-                if !visible {
-                    continue;
+        state.release_hidden_nodes();
+
+        if let Some(qh) = data.qh.clone() {
+            let visible: Vec<bool> = state
+                .windows
+                .iter()
+                .map(|window| state.window_is_visible(window))
+                .collect();
+            for (window, visible) in state.windows.iter_mut().zip(visible) {
+                if window.node.is_none() && visible {
+                    window.node = Some(window.proxy.get_node(&qh, ()));
                 }
-                let node = window.proxy.get_node(&qh, ());
-                window.node = Some(node);
-                requested += 1;
             }
         }
-        log::debug!("render requested {requested} window nodes");
     }
 
-    layout::render_all_run(data);
+    let focused = {
+        let state = data.state.borrow();
+        state
+            .active_output()
+            .and_then(|o| state.outputs[o].focused_window)
+    };
+    layout::render_all_run(&mut data.state.borrow_mut(), &data.config, focused);
 
     wm.render_finish();
 
