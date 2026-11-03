@@ -69,11 +69,7 @@ pub fn spawn(config: Lid) {
         }
     });
 
-    thread::spawn(move || {
-        if let Err(e) = run(&config, lid_rx) {
-            log::error!("lid listener error: {e}");
-        }
-    });
+    thread::spawn(move || run(&config, lid_rx));
 }
 
 /// Connect to logind, hold the `handle-lid-switch` inhibitor for the lifetime
@@ -125,10 +121,7 @@ fn inhibit_lid_switch(proxy: &Proxy<'_>) -> Option<zbus::zvariant::OwnedFd> {
 
 /// Topology/profile reaction loop. Reads DRM topology on an interval and
 /// consumes lid-state events from logind.
-fn run(
-    config: &Lid,
-    lid_rx: mpsc::Receiver<LidEvent>,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn run(config: &Lid, lid_rx: mpsc::Receiver<LidEvent>) {
     log::info!("lid listener: using logind lid state, polling DRM topology");
 
     let mut prev_lid_closed: Option<bool> = None;
@@ -149,17 +142,21 @@ fn run(
         let initial_state = prev_topology.is_none();
         let topology_changed = prev_topology != Some(topology);
 
+        // Profile switches are best-effort: a transient failure (kanshi not
+        // up yet, D-Bus hiccup) must not kill the listener for the rest of the
+        // session: failures only log (inside `run_command`) and the next tick
+        // retries.
         if prev_lid_closed.is_none() {
-            apply_current_profile(config, closed, topology, "initial display state")?;
+            apply_current_profile(config, closed, topology, "initial display state");
         } else if let Some(prev) = prev_lid_closed {
             if closed != prev {
                 if closed {
-                    apply_closed_profile(config, topology, "lid closed")?;
+                    apply_closed_profile(config, topology, "lid closed");
                 } else {
                     thread::sleep(OPEN_DEBOUNCE);
-                    recover_open_outputs(config, display_topology(&config.internal_output))?;
+                    recover_open_outputs(config, display_topology(&config.internal_output));
                     thread::sleep(OPEN_RETRY_DELAY);
-                    recover_open_outputs(config, display_topology(&config.internal_output))?;
+                    recover_open_outputs(config, display_topology(&config.internal_output));
                 }
             }
         }
@@ -170,7 +167,7 @@ fn run(
 
             if should_recover_undocked(closed, topology, topology_changed, retry_due) {
                 let recovered_at = Instant::now();
-                let recovered = recover_undocked(config)?;
+                let recovered = recover_undocked(config);
                 // A failing recovery (kanshi down, profile missing) is retried
                 // until it succeeds; a successful one is not re-applied.
                 recovery_retry = (!recovered).then(|| recovered_at + RECOVERY_RETRY_INTERVAL);
@@ -188,7 +185,7 @@ fn run(
             } else if topology_changed && topology.external_connected {
                 undocked_retry = None;
                 recovery_retry = None;
-                apply_profile(&config.open_profile, "external output connected")?;
+                apply_profile(&config.open_profile, "external output connected");
             } else if !topology.internal_connected || topology.external_connected {
                 undocked_retry = None;
                 recovery_retry = None;
@@ -196,7 +193,7 @@ fn run(
         } else if !initial_state && topology_changed {
             // A dock can be attached or removed while the lid is already
             // closed. Re-evaluate instead of waiting for another lid event.
-            apply_closed_profile(config, topology, "closed-lid topology changed")?;
+            apply_closed_profile(config, topology, "closed-lid topology changed");
             undocked_retry = None;
             recovery_retry = None;
         } else {
@@ -221,16 +218,17 @@ fn latest_lid_event(events: mpsc::TryIter<'_, LidEvent>) -> Option<bool> {
 }
 
 /// Apply the profile matching the current lid state and connector topology.
+/// Returns whether the profile switch succeeded (used to schedule retries).
 fn apply_current_profile(
     config: &Lid,
     closed: bool,
     topology: DisplayTopology,
     reason: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> bool {
     if closed {
         apply_closed_profile(config, topology, reason)
     } else if topology.internal_connected && !topology.external_connected {
-        recover_undocked(config).map(|_| ())
+        recover_undocked(config)
     } else {
         apply_profile(&config.open_profile, reason)
     }
@@ -239,11 +237,7 @@ fn apply_current_profile(
 /// Apply clamshell only when an external display is available. Keeping the
 /// internal panel enabled without one prevents a closed-lid undock from
 /// stranding the session on a black screen.
-fn apply_closed_profile(
-    config: &Lid,
-    topology: DisplayTopology,
-    reason: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn apply_closed_profile(config: &Lid, topology: DisplayTopology, reason: &str) -> bool {
     if clamshell_available(topology) {
         apply_profile(&config.close_profile, reason)
     } else {
@@ -251,7 +245,7 @@ fn apply_closed_profile(
             "lid/output recovery: {reason}; no external output is connected, preserving `{}`",
             config.internal_output
         );
-        recover_undocked(config).map(|_| ())
+        recover_undocked(config)
     }
 }
 
@@ -260,12 +254,9 @@ fn clamshell_available(topology: DisplayTopology) -> bool {
 }
 
 /// Recover outputs for an open lid based on the current connector topology.
-fn recover_open_outputs(
-    config: &Lid,
-    topology: DisplayTopology,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn recover_open_outputs(config: &Lid, topology: DisplayTopology) -> bool {
     if topology.internal_connected && !topology.external_connected {
-        recover_undocked(config).map(|_| ())
+        recover_undocked(config)
     } else {
         apply_profile(&config.open_profile, "lid opened")
     }
@@ -273,7 +264,7 @@ fn recover_open_outputs(
 
 /// Re-enable the internal panel via `wlr-randr` and switch to the undocked
 /// kanshi profile. Reports whether both commands succeeded.
-fn recover_undocked(config: &Lid) -> Result<bool, Box<dyn std::error::Error>> {
+fn recover_undocked(config: &Lid) -> bool {
     log::info!(
         "lid/output recovery: internal={} connected, no external outputs; switching kanshi to `{}`",
         config.internal_output,
@@ -285,14 +276,13 @@ fn recover_undocked(config: &Lid) -> Result<bool, Box<dyn std::error::Error>> {
         &["--output", &config.internal_output, "--on", "--preferred"],
     );
     let profile_ok = switch_kanshi_profile(&config.undocked_profile);
-    Ok(output_ok && profile_ok)
+    output_ok && profile_ok
 }
 
 /// Switch kanshi to a named profile, logging the rationale.
-fn apply_profile(profile: &str, reason: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn apply_profile(profile: &str, reason: &str) -> bool {
     log::info!("lid/output recovery: {reason}; switching kanshi to `{profile}`");
-    switch_kanshi_profile(profile);
-    Ok(())
+    switch_kanshi_profile(profile)
 }
 
 /// Helper predicate determining if undocked panel recovery should trigger.
