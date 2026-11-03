@@ -86,7 +86,7 @@ impl Subscribers {
     }
 
     /// Remove a subscriber that has disconnected.
-    fn unregister(&mut self, id: u64) {
+    pub(crate) fn unregister(&mut self, id: u64) {
         self.clients.retain(|c| c.id != id);
     }
 
@@ -527,7 +527,9 @@ pub fn apply_command(data: &mut crate::connection::AppData, cmd: Command) {
                 Some(name) => s.find_output_by_name(&name),
                 None => s.active_output(),
             };
-            if let Some(o) = o {
+            // The socket is outside `NUM_TAGS`: an out-of-range tag must not
+            // be stored as an active tag (it would index past the tag table).
+            if let Some(o) = o.filter(|o| (tag as usize) < s.tags.len() && *o < s.outputs.len()) {
                 s.focus_tag(o, tag as usize);
             }
         }
@@ -555,14 +557,17 @@ pub fn apply_command(data: &mut crate::connection::AppData, cmd: Command) {
                 .windows
                 .iter()
                 .find(|w| {
+                    // An omitted title is a wildcard; a given one must match.
+                    // (The previous `title.as_deref().is_none() ||` arm made
+                    // every request with a title match the first window.)
                     w.app_id.as_deref() == Some(app_id.as_str())
-                        && (title.is_none()
-                            || title.as_deref().is_none()
-                            || w.title.as_deref() == title.as_deref())
+                        && title
+                            .as_deref()
+                            .is_none_or(|t| w.title.as_deref() == Some(t))
                 })
                 .map(|w| (w.id, w.tag));
             if let Some((wid, tag)) = target {
-                if let Some(output) = s.tag_owner(tag) {
+                if let Some(output) = s.tag_owner(tag).filter(|o| *o < s.outputs.len()) {
                     s.focused_output = Some(output);
                     s.switch_active_tag(output, tag);
                     s.outputs[output].focused_window = Some(wid);
@@ -806,6 +811,55 @@ mod tests {
         assert!(!build_snapshot(&state, false).resize_mode);
         state.toggle_resize_mode();
         assert!(build_snapshot(&state, false).resize_mode);
+    }
+
+    #[test]
+    fn socket_commands_reach_the_compositor() {
+        // Socket commands used to mutate state and never request a manage
+        // sequence, so `focus_tag` from a bar or script did nothing.
+        let (state, mut data) = app();
+        apply_command(&mut data, Command::FocusTag(4, None));
+        assert_eq!(state.borrow().tag_owner(4), Some(0), "tag created");
+        assert!(state.borrow().pending_apply, "command marks state for a manage");
+
+        flush_pending(&mut data);
+        assert!(!state.borrow().pending_apply, "requested exactly once");
+    }
+
+    #[test]
+    fn socket_focus_tag_out_of_range_is_ignored() {
+        let (state, mut data) = app();
+        apply_command(&mut data, Command::FocusTag(99, None));
+        apply_command(&mut data, Command::SendToTag(99));
+        assert_eq!(state.borrow().outputs[0].active_tag, 0);
+        assert_eq!(state.borrow().tag_owner(0), Some(0));
+    }
+
+    #[test]
+    fn focus_window_title_filters_the_match() {
+        // With a title, the first window of the app used to match regardless
+        // of its title, so the picker focused the wrong window.
+        let (state, mut data) = app();
+        let a = window("foot", "first");
+        let b = window("foot", "wanted");
+        let (first, wanted) = (a.id, b.id);
+        state.borrow_mut().windows.push(a);
+        state.borrow_mut().windows.push(b);
+
+        apply_command(
+            &mut data,
+            Command::FocusWindow("foot".into(), Some("wanted".into())),
+        );
+        assert_eq!(state.borrow().outputs[0].focused_window, Some(wanted));
+
+        apply_command(
+            &mut data,
+            Command::FocusWindow("foot".into(), Some("missing".into())),
+        );
+        assert_eq!(state.borrow().outputs[0].focused_window, Some(wanted));
+
+        apply_command(&mut data, Command::FocusWindow("foot".into(), None));
+        assert_eq!(state.borrow().outputs[0].focused_window, Some(first));
     }
 
     #[test]
