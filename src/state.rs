@@ -593,15 +593,16 @@ impl State {
     }
 
     /// Drop render nodes of windows that are not on an active tag (and so are
-    /// not on any output). Nodes are only created for visible windows, so
-    /// keeping them alive leaks one `river_node_v1` per window hidden by a tag
-    /// switch. Must run inside a render sequence: `river_window_v1.get_node`
-    /// is an error while a stale node exists.
+    /// not on any output). Nodes are only created for visible windows, and
+    /// dropping the client proxy alone leaves the server-side node alive, so
+    /// the next `river_window_v1.get_node` fails with "window already has a
+    /// node object". Destroy the node before forgetting it. Must run inside a
+    /// render sequence: `get_node` is an error while a stale node exists.
     pub fn release_hidden_nodes(&mut self) {
         let active: Vec<usize> = self.outputs.iter().map(|o| o.active_tag).collect();
-        for window in self.windows.iter_mut() {
-            if window.node.is_some() && !active.contains(&window.tag) {
-                window.node = None;
+        for window in self.windows.iter_mut().filter(|w| !active.contains(&w.tag)) {
+            if let Some(node) = window.node.take() {
+                node.destroy();
             }
         }
     }
